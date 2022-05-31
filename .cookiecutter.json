@@ -1,0 +1,13 @@
+{
+  "_template": "gh:cjolowicz/cookiecutter-hypermodern-python",
+  "author": "Dominik Kozaczko",
+  "copyright_year": "2022",
+  "development_status": "Development Status :: 1 - Planning",
+  "email": "dominik@kozaczko.info",
+  "friendly_name": "Getpaid Core",
+  "github_user": "dekoza",
+  "license": "MIT",
+  "package_name": "getpaid_core",
+  "project_name": "getpaid-core",
+  "version": "0.0.0"
+}
