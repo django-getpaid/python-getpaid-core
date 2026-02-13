@@ -1,7 +1,7 @@
 # Contributor Guide
 
 Thank you for your interest in improving getpaid-core.
-This project is open-source under the [MIT license](LICENSE) and
+This project is open-source under the [MIT license](https://github.com/django-getpaid/getpaid-core/blob/main/LICENSE) and
 welcomes contributions in the form of bug reports, feature requests, and pull requests.
 
 ## Resources
