@@ -1,18 +1,18 @@
 # Contributor Guide
 
 Thank you for your interest in improving getpaid-core.
-This project is open-source under the [MIT license](https://github.com/django-getpaid/getpaid-core/blob/main/LICENSE) and
+This project is open-source under the [MIT license](https://github.com/django-getpaid/python-getpaid-core/blob/main/LICENSE) and
 welcomes contributions in the form of bug reports, feature requests, and pull requests.
 
 ## Resources
 
-- [Source Code](https://github.com/django-getpaid/getpaid-core)
+- [Source Code](https://github.com/django-getpaid/python-getpaid-core)
 - [Documentation](https://getpaid-core.readthedocs.io/)
-- [Issue Tracker](https://github.com/django-getpaid/getpaid-core/issues)
+- [Issue Tracker](https://github.com/django-getpaid/python-getpaid-core/issues)
 
 ## How to report a bug
 
-Report bugs on the [Issue Tracker](https://github.com/django-getpaid/getpaid-core/issues).
+Report bugs on the [Issue Tracker](https://github.com/django-getpaid/python-getpaid-core/issues).
 
 When filing an issue, include:
 
@@ -28,8 +28,8 @@ You need Python 3.12+ and [uv](https://docs.astral.sh/uv/).
 Clone and install:
 
 ```bash
-git clone https://github.com/django-getpaid/getpaid-core.git
-cd getpaid-core
+git clone https://github.com/django-getpaid/python-getpaid-core.git
+cd python-getpaid-core
 uv sync
 ```
 

@@ -2,7 +2,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/python-getpaid-core.svg)](https://pypi.org/project/python-getpaid-core/)
 [![Python Version](https://img.shields.io/pypi/pyversions/python-getpaid-core)](https://pypi.org/project/python-getpaid-core/)
-[![License](https://img.shields.io/pypi/l/python-getpaid-core)](https://github.com/django-getpaid/getpaid-core/blob/main/LICENSE)
+[![License](https://img.shields.io/pypi/l/python-getpaid-core)](https://github.com/django-getpaid/python-getpaid-core/blob/main/LICENSE)
 
 Framework-agnostic payment processing library for Python. Provides the core
 abstractions — enums, protocols, FSM, processor base class, plugin registry,

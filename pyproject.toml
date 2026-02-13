@@ -40,10 +40,10 @@ dev = [
 ]
 
 [project.urls]
-Homepage = 'https://github.com/dekoza/getpaid-core'
-Repository = 'https://github.com/dekoza/getpaid-core'
+Homepage = 'https://github.com/django-getpaid/python-getpaid-core'
+Repository = 'https://github.com/django-getpaid/python-getpaid-core'
 Documentation = 'https://getpaid-core.readthedocs.io'
-Changelog = 'https://github.com/dekoza/getpaid-core/releases'
+Changelog = 'https://github.com/django-getpaid/python-getpaid-core/releases'
 
 [build-system]
 requires = ['hatchling']
