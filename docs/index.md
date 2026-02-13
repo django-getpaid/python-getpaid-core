@@ -1,23 +1,16 @@
-```{include} ../README.md
----
-end-before: <!-- github-only -->
----
-```
-
-[license]: license
-[contributor guide]: contributing
-[command-line reference]: usage
+:::{include} ../README.md
+:end-before: "## License"
+:::
 
 ```{toctree}
----
-hidden:
-maxdepth: 1
----
+:hidden:
+:maxdepth: 2
 
-usage
+getting-started
+concepts
 reference
+changelog
 contributing
 Code of Conduct <codeofconduct>
 License <license>
-Changelog <https://github.com/dekoza/getpaid-core/releases>
 ```
