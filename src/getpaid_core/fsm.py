@@ -29,6 +29,26 @@ def _require_fully_refunded(event_data):
         )
 
 
+def _store_locked_amount(event_data):
+    """After confirm_lock: store the locked amount on the payment."""
+    model = event_data.model
+    amount = event_data.kwargs.get("amount", None)
+    if amount is None:
+        amount = model.amount_required
+    model.amount_locked = amount
+
+
+def _accumulate_paid_amount(event_data):
+    """After confirm_payment: accumulate paid amount on the payment."""
+    model = event_data.model
+    amount = event_data.kwargs.get("amount", None)
+    if amount is None:
+        if not model.amount_locked:
+            model.amount_locked = model.amount_required
+        amount = model.amount_locked
+    model.amount_paid += amount
+
+
 PAYMENT_TRANSITIONS = [
     {
         "trigger": "confirm_prepared",
@@ -39,6 +59,7 @@ PAYMENT_TRANSITIONS = [
         "trigger": "confirm_lock",
         "source": [PaymentStatus.NEW, PaymentStatus.PREPARED],
         "dest": PaymentStatus.PRE_AUTH,
+        "after": _store_locked_amount,
     },
     {
         "trigger": "confirm_charge_sent",
@@ -54,6 +75,7 @@ PAYMENT_TRANSITIONS = [
             PaymentStatus.PARTIAL,
         ],
         "dest": PaymentStatus.PARTIAL,
+        "after": _accumulate_paid_amount,
     },
     {
         "trigger": "mark_as_paid",
@@ -163,6 +185,12 @@ def create_payment_machine(payment) -> Machine:
     )
 
 
+def _store_fraud_message(event):
+    """Before callback: store message kwarg on the payment object."""
+    message = event.kwargs.get("message", "")
+    event.model.fraud_message = message
+
+
 def create_fraud_machine(payment) -> Machine:
     """Attach fraud status FSM to a payment object."""
     return Machine(
@@ -172,4 +200,6 @@ def create_fraud_machine(payment) -> Machine:
         initial=payment.fraud_status or FraudStatus.UNKNOWN,
         model_attribute="fraud_status",
         auto_transitions=False,
+        send_event=True,
+        before_state_change=[_store_fraud_message],
     )

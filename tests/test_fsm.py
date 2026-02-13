@@ -21,7 +21,9 @@ class MockPayment:
         self.fraud_status = fraud_status
         self.amount_required = 100
         self.amount_paid = 0
+        self.amount_locked = 0
         self.amount_refunded = 0
+        self.fraud_message = ""
 
     def is_fully_paid(self):
         return self.amount_paid >= self.amount_required
