@@ -1,115 +1,61 @@
 # Contributor Guide
 
-Thank you for your interest in improving this project.
-This project is open-source under the [MIT license] and
+Thank you for your interest in improving getpaid-core.
+This project is open-source under the [MIT license](LICENSE) and
 welcomes contributions in the form of bug reports, feature requests, and pull requests.
 
-Here is a list of important resources for contributors:
+## Resources
 
-- [Source Code]
-- [Documentation]
-- [Issue Tracker]
-- [Code of Conduct]
-
-[mit license]: https://opensource.org/licenses/MIT
-[source code]: https://github.com/dekoza/getpaid-core
-[documentation]: https://getpaid-core.readthedocs.io/
-[issue tracker]: https://github.com/dekoza/getpaid-core/issues
+- [Source Code](https://github.com/django-getpaid/getpaid-core)
+- [Documentation](https://getpaid-core.readthedocs.io/)
+- [Issue Tracker](https://github.com/django-getpaid/getpaid-core/issues)
 
 ## How to report a bug
 
-Report bugs on the [Issue Tracker].
+Report bugs on the [Issue Tracker](https://github.com/django-getpaid/getpaid-core/issues).
 
-When filing an issue, make sure to answer these questions:
+When filing an issue, include:
 
-- Which operating system and Python version are you using?
-- Which version of this project are you using?
-- What did you do?
-- What did you expect to see?
-- What did you see instead?
-
-The best way to get your bug fixed is to provide a test case,
-and/or steps to reproduce the issue.
-
-## How to request a feature
-
-Request features on the [Issue Tracker].
+- Operating system and Python version
+- getpaid-core version
+- Steps to reproduce
+- Expected vs actual behavior
 
 ## How to set up your development environment
 
-You need Python 3.7+ and the following tools:
+You need Python 3.12+ and [uv](https://docs.astral.sh/uv/).
 
-- [Poetry]
-- [Nox]
-- [nox-poetry]
+Clone and install:
 
-Install the package with development requirements:
-
-```console
-$ poetry install
+```bash
+git clone https://github.com/django-getpaid/getpaid-core.git
+cd getpaid-core
+uv sync
 ```
 
-You can now run an interactive Python session,
-or the command-line interface:
+Run tests:
 
-```console
-$ poetry run python
-$ poetry run getpaid-core
+```bash
+uv run pytest
 ```
 
-[poetry]: https://python-poetry.org/
-[nox]: https://nox.thea.codes/
-[nox-poetry]: https://nox-poetry.readthedocs.io/
+Run linting:
 
-## How to test the project
-
-Run the full test suite:
-
-```console
-$ nox
+```bash
+uv run ruff check src/ tests/
+uv run ruff format --check src/ tests/
 ```
-
-List the available Nox sessions:
-
-```console
-$ nox --list-sessions
-```
-
-You can also run a specific Nox session.
-For example, invoke the unit test suite like this:
-
-```console
-$ nox --session=tests
-```
-
-Unit tests are located in the _tests_ directory,
-and are written using the [pytest] testing framework.
-
-[pytest]: https://pytest.readthedocs.io/
 
 ## How to submit changes
 
-Open a [pull request] to submit changes to this project.
+1. Fork the repository and create a feature branch
+2. Write tests for your changes
+3. Ensure all tests pass: `uv run pytest`
+4. Ensure linting passes: `uv run ruff check src/ tests/`
+5. Open a pull request
 
-Your pull request needs to meet the following guidelines for acceptance:
+Your pull request needs to:
 
-- The Nox test suite must pass without errors and warnings.
-- Include unit tests. This project maintains 100% code coverage.
-- If your changes add functionality, update the documentation accordingly.
-
-Feel free to submit early, though—we can always iterate on this.
-
-To run linting and code formatting checks before committing your change, you can install pre-commit as a Git hook by running the following command:
-
-```console
-$ nox --session=pre-commit -- install
-```
-
-It is recommended to open an issue before starting work on anything.
-This will allow a chance to talk it over with the owners and validate your approach.
-
-[pull request]: https://github.com/dekoza/getpaid-core/pulls
-
-<!-- github-only -->
-
-[code of conduct]: CODE_OF_CONDUCT.md
+- Pass the test suite without errors
+- Include tests for new functionality
+- Update documentation if adding features
