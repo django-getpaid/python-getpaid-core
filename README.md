@@ -1,73 +1,71 @@
-# Getpaid Core
+# getpaid-core
 
-[![PyPI](https://img.shields.io/pypi/v/getpaid-core.svg)][pypi_]
-[![Status](https://img.shields.io/pypi/status/getpaid-core.svg)][status]
-[![Python Version](https://img.shields.io/pypi/pyversions/getpaid-core)][python version]
-[![License](https://img.shields.io/pypi/l/getpaid-core)][license]
+[![PyPI](https://img.shields.io/pypi/v/getpaid-core.svg)](https://pypi.org/project/getpaid-core/)
+[![Python Version](https://img.shields.io/pypi/pyversions/getpaid-core)](https://pypi.org/project/getpaid-core/)
+[![License](https://img.shields.io/pypi/l/getpaid-core)](https://github.com/django-getpaid/getpaid-core/blob/main/LICENSE)
 
-[![Read the documentation at https://getpaid-core.readthedocs.io/](https://img.shields.io/readthedocs/getpaid-core/latest.svg?label=Read%20the%20Docs)][read the docs]
-[![Tests](https://github.com/dekoza/getpaid-core/workflows/Tests/badge.svg)][tests]
-[![Codecov](https://codecov.io/gh/dekoza/getpaid-core/branch/main/graph/badge.svg)][codecov]
+Framework-agnostic payment processing library for Python. Provides the core
+abstractions — enums, protocols, FSM, processor base class, plugin registry,
+and exception hierarchy — that framework-specific adapters build on.
 
-[![pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit&logoColor=white)][pre-commit]
-[![Black](https://img.shields.io/badge/code%20style-black-000000.svg)][black]
+## Architecture
 
-[pypi_]: https://pypi.org/project/getpaid-core/
-[status]: https://pypi.org/project/getpaid-core/
-[python version]: https://pypi.org/project/getpaid-core
-[read the docs]: https://getpaid-core.readthedocs.io/
-[tests]: https://github.com/dekoza/getpaid-core/actions?workflow=Tests
-[codecov]: https://app.codecov.io/gh/dekoza/getpaid-core
-[pre-commit]: https://github.com/pre-commit/pre-commit
-[black]: https://github.com/psf/black
+getpaid-core defines the **what** of payment processing without coupling to
+any web framework:
 
-## Features
+- **Enums** (`PaymentStatus`, `FraudStatus`, `BackendMethod`, `ConfirmationMethod`)
+  define all valid states and methods.
+- **Protocols** (`Payment`, `Order`, `PaymentRepository`) define structural
+  contracts that framework models must satisfy.
+- **FSM** (`create_payment_machine`, `create_fraud_machine`) attaches
+  state-machine triggers to payment objects at runtime using the `transitions`
+  library.
+- **BaseProcessor** is an abstract class that payment gateway plugins subclass
+  to implement `prepare_transaction`, `handle_callback`, `charge`, etc.
+- **PluginRegistry** discovers and stores payment backend processors via
+  entry points or manual registration.
+- **Exceptions** provide a structured hierarchy for payment errors.
 
-- TODO
+## Framework Adapters
 
-## Requirements
-
-- TODO
+- **[django-getpaid](https://github.com/django-getpaid/django-getpaid)** —
+  Django adapter (models, views, forms, admin)
 
 ## Installation
 
-You can install _Getpaid Core_ via [pip] from [PyPI]:
-
-```console
-$ pip install getpaid-core
+```bash
+pip install getpaid-core
 ```
 
-## Usage
+You typically install this as a dependency of a framework adapter rather than
+directly.
 
-Please see the [Command-line Reference] for details.
+## Quick Example
 
-## Contributing
+```python
+from getpaid_core.enums import PaymentStatus
+from getpaid_core.fsm import create_payment_machine
 
-Contributions are very welcome.
-To learn more, see the [Contributor Guide].
+# Any object satisfying the Payment protocol works
+payment = MyPayment(status=PaymentStatus.NEW, amount_required=100)
+machine = create_payment_machine(payment)
+
+# FSM trigger methods are attached directly to the object
+payment.confirm_prepared()
+assert payment.status == PaymentStatus.PREPARED
+```
+
+## Requirements
+
+- Python 3.12+
+- transitions
+- httpx
+- anyio
 
 ## License
 
-Distributed under the terms of the [MIT license][license],
-_Getpaid Core_ is free and open source software.
-
-## Issues
-
-If you encounter any problems,
-please [file an issue] along with a detailed description.
+MIT
 
 ## Credits
 
-This project was generated from [@cjolowicz]'s [Hypermodern Python Cookiecutter] template.
-
-[@cjolowicz]: https://github.com/cjolowicz
-[pypi]: https://pypi.org/
-[hypermodern python cookiecutter]: https://github.com/cjolowicz/cookiecutter-hypermodern-python
-[file an issue]: https://github.com/dekoza/getpaid-core/issues
-[pip]: https://pip.pypa.io/
-
-<!-- github-only -->
-
-[license]: https://github.com/dekoza/getpaid-core/blob/main/LICENSE
-[contributor guide]: https://github.com/dekoza/getpaid-core/blob/main/CONTRIBUTING.md
-[command-line reference]: https://getpaid-core.readthedocs.io/en/latest/usage.html
+Created by [Dominik Kozaczko](https://github.com/dekoza).
