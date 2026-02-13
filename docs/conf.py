@@ -2,7 +2,7 @@
 
 project = "getpaid-core"
 author = "Dominik Kozaczko"
-copyright = "2022-2026, Dominik Kozaczko"
+project_copyright = "2022-2026, Dominik Kozaczko"
 
 extensions = [
     "sphinx.ext.autodoc",

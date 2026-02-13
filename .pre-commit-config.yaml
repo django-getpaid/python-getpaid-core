@@ -1,14 +1,39 @@
 repos:
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.9.6
+  - repo: local
     hooks:
       - id: ruff
-        args: [--fix]
+        name: ruff
+        entry: uv run ruff check --fix
+        language: system
+        types: [python]
       - id: ruff-format
-  - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v5.0.0
-    hooks:
+        name: ruff-format
+        entry: uv run ruff format
+        language: system
+        types: [python]
       - id: check-toml
+        name: check-toml
+        entry: uv run check-toml
+        language: system
+        types: [toml]
       - id: check-yaml
+        name: check-yaml
+        entry: uv run check-yaml
+        language: system
+        types: [yaml]
       - id: end-of-file-fixer
+        name: end-of-file-fixer
+        entry: uv run end-of-file-fixer
+        language: system
+        types: [text]
       - id: trailing-whitespace
+        name: trailing-whitespace
+        entry: uv run trailing-whitespace-fixer
+        language: system
+        types: [text]
+      - id: ty
+        name: ty
+        entry: uv run ty check
+        language: system
+        types: [python]
+        pass_filenames: false

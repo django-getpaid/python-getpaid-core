@@ -58,7 +58,7 @@ class PaymentFlow:
         create_payment_machine(payment)
         processor = self._get_processor(payment)
         result = await processor.prepare_transaction(**kwargs)
-        payment.confirm_prepared()
+        payment.confirm_prepared()  # ty: ignore[unresolved-attribute]  # FSM trigger attached by create_payment_machine
         await self.repository.save(payment)
         return result
 
@@ -101,7 +101,7 @@ class PaymentFlow:
         create_payment_machine(payment)
         result = await processor.charge(amount=amount, **kwargs)
         if result["success"]:
-            payment.confirm_charge_sent()
+            payment.confirm_charge_sent()  # ty: ignore[unresolved-attribute]  # FSM trigger attached by create_payment_machine
         await self.repository.save(payment)
         return result
 
@@ -110,7 +110,7 @@ class PaymentFlow:
         processor = self._get_processor(payment)
         create_payment_machine(payment)
         amount = await processor.release_lock(**kwargs)
-        payment.release_lock()
+        payment.release_lock()  # ty: ignore[unresolved-attribute]  # FSM trigger attached by create_payment_machine
         await self.repository.save(payment)
         return amount
 
@@ -119,7 +119,7 @@ class PaymentFlow:
         processor = self._get_processor(payment)
         create_payment_machine(payment)
         refund_amount = await processor.start_refund(amount=amount, **kwargs)
-        payment.start_refund()
+        payment.start_refund()  # ty: ignore[unresolved-attribute]  # FSM trigger attached by create_payment_machine
         await self.repository.save(payment)
         return refund_amount
 
@@ -129,7 +129,7 @@ class PaymentFlow:
         create_payment_machine(payment)
         success = await processor.cancel_refund(**kwargs)
         if success:
-            payment.cancel_refund()
+            payment.cancel_refund()  # ty: ignore[unresolved-attribute]  # FSM trigger attached by create_payment_machine
             await self.repository.save(payment)
         return success
 
