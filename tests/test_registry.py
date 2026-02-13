@@ -1,6 +1,5 @@
 """Tests for getpaid_core.registry.PluginRegistry."""
 
-from decimal import Decimal
 from unittest.mock import patch
 
 import pytest

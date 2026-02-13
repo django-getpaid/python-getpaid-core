@@ -8,6 +8,7 @@ payment gateway's capabilities.
 from abc import ABC
 from abc import abstractmethod
 from decimal import Decimal
+from typing import ClassVar
 
 from getpaid_core.protocols import Payment
 from getpaid_core.types import ChargeResponse
@@ -18,12 +19,12 @@ from getpaid_core.types import TransactionResult
 class BaseProcessor(ABC):
     """Base class for payment backend processors."""
 
-    slug: str = ""
-    display_name: str = ""
-    accepted_currencies: list[str] = []
-    logo_url: str | None = None
-    sandbox_url: str = ""
-    production_url: str = ""
+    slug: ClassVar[str] = ""
+    display_name: ClassVar[str] = ""
+    accepted_currencies: ClassVar[list[str]] = []
+    logo_url: ClassVar[str | None] = None
+    sandbox_url: ClassVar[str] = ""
+    production_url: ClassVar[str] = ""
 
     def __init__(self, payment: Payment, config: dict | None = None) -> None:
         self.payment = payment

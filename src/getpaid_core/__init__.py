@@ -18,8 +18,8 @@ from getpaid_core.flow import PaymentFlow
 from getpaid_core.processor import BaseProcessor
 from getpaid_core.registry import registry
 
+
 __all__ = [
-    "__version__",
     "BackendMethod",
     "BaseProcessor",
     "ChargeFailure",
@@ -34,5 +34,6 @@ __all__ = [
     "PaymentFlow",
     "PaymentStatus",
     "RefundFailure",
+    "__version__",
     "registry",
 ]

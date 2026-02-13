@@ -12,7 +12,6 @@ from getpaid_core.flow import PaymentFlow
 from tests.conftest import MockOrder
 from tests.conftest import MockPayment
 from tests.conftest import MockProcessor
-from tests.conftest import MockRepository
 
 
 @pytest.fixture
@@ -99,14 +98,16 @@ class TestFetchAndUpdateStatus:
     async def test_pull_disallowed_callback(self, flow):
         payment = MockPayment(backend="mock", status=PaymentStatus.PREPARED)
         # Patch processor to return a disallowed callback
-        with patch.object(
-            MockProcessor,
-            "fetch_payment_status",
-            new_callable=AsyncMock,
-            return_value={"status": "flag_as_fraud"},
+        with (
+            patch.object(
+                MockProcessor,
+                "fetch_payment_status",
+                new_callable=AsyncMock,
+                return_value={"status": "flag_as_fraud"},
+            ),
+            pytest.raises(InvalidTransitionError),
         ):
-            with pytest.raises(InvalidTransitionError):
-                await flow.fetch_and_update_status(payment)
+            await flow.fetch_and_update_status(payment)
 
 
 class TestCharge:

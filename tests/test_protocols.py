@@ -2,8 +2,6 @@
 
 from decimal import Decimal
 
-import pytest
-
 from getpaid_core.protocols import Order
 from getpaid_core.protocols import Payment
 from getpaid_core.protocols import PaymentRepository

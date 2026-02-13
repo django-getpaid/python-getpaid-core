@@ -266,7 +266,7 @@ class TestAllowedCallbacks:
             "mark_as_refunded",
             "fail",
         }
-        assert ALLOWED_CALLBACKS == expected
+        assert expected == ALLOWED_CALLBACKS
 
     def test_does_not_contain_fraud_triggers(self):
         """Fraud triggers should not be externally invocable."""

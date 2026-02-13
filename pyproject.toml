@@ -76,9 +76,16 @@ select = [
     'B',    # flake8-bugbear
     'A',    # flake8-builtins
     'SIM',  # flake8-simplify
-    'TCH',  # type-checking imports
+    'TC',   # type-checking imports
     'RUF',  # ruff-specific
 ]
+ignore = [
+    'N818',  # Exception names match django-getpaid convention
+    'B027',  # Empty methods in ABC are intentional default no-ops
+]
+
+[tool.ruff.lint.per-file-ignores]
+'tests/**' = ['TC001', 'RUF012']
 
 [tool.ruff.lint.isort]
 force-single-line = true

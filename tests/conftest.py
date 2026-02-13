@@ -1,7 +1,6 @@
 """Shared test fixtures for getpaid-core."""
 
 from decimal import Decimal
-from unittest.mock import AsyncMock
 
 import pytest
 
