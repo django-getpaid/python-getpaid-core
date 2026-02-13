@@ -1,5 +1,5 @@
 [project]
-name = 'getpaid-core'
+name = 'python-getpaid-core'
 version = '0.1.0'
 description = 'Framework-agnostic payment processing core.'
 readme = 'README.md'

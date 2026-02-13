@@ -1,8 +1,8 @@
 # getpaid-core
 
-[![PyPI](https://img.shields.io/pypi/v/getpaid-core.svg)](https://pypi.org/project/getpaid-core/)
-[![Python Version](https://img.shields.io/pypi/pyversions/getpaid-core)](https://pypi.org/project/getpaid-core/)
-[![License](https://img.shields.io/pypi/l/getpaid-core)](https://github.com/django-getpaid/getpaid-core/blob/main/LICENSE)
+[![PyPI](https://img.shields.io/pypi/v/python-getpaid-core.svg)](https://pypi.org/project/python-getpaid-core/)
+[![Python Version](https://img.shields.io/pypi/pyversions/python-getpaid-core)](https://pypi.org/project/python-getpaid-core/)
+[![License](https://img.shields.io/pypi/l/python-getpaid-core)](https://github.com/django-getpaid/getpaid-core/blob/main/LICENSE)
 
 Framework-agnostic payment processing library for Python. Provides the core
 abstractions — enums, protocols, FSM, processor base class, plugin registry,
@@ -34,7 +34,7 @@ any web framework:
 ## Installation
 
 ```bash
-pip install getpaid-core
+pip install python-getpaid-core
 ```
 
 You typically install this as a dependency of a framework adapter rather than
@@ -65,6 +65,11 @@ assert payment.status == PaymentStatus.PREPARED
 ## License
 
 MIT
+
+## Disclaimer
+
+This project has nothing in common with the
+[getpaid](http://code.google.com/p/getpaid/) plone project.
 
 ## Credits
 

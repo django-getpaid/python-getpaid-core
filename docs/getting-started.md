@@ -2,16 +2,16 @@
 
 ## Installation
 
-Install getpaid-core from PyPI:
+Install getpaid-core from PyPI (distributed as `python-getpaid-core`):
 
 ```bash
-pip install getpaid-core
+pip install python-getpaid-core
 ```
 
 Or add it as a dependency with uv:
 
 ```bash
-uv add getpaid-core
+uv add python-getpaid-core
 ```
 
 ## Basic Concepts
