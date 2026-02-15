@@ -30,6 +30,10 @@ any web framework:
 
 - **[django-getpaid](https://github.com/django-getpaid/django-getpaid)** —
   Django adapter (models, views, forms, admin)
+- **[fastapi-getpaid](https://github.com/django-getpaid/fastapi-getpaid)** —
+  FastAPI adapter (async routes, SQLAlchemy, Pydantic config)
+- **[litestar-getpaid](https://github.com/django-getpaid/litestar-getpaid)** —
+  Litestar adapter (controllers, Provide DI, SQLAlchemy, Pydantic config)
 
 ## Installation
 

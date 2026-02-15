@@ -27,12 +27,12 @@ class PluginRegistry:
             if isinstance(processor_class, type) and issubclass(
                 processor_class, BaseProcessor
             ):
-                self._backends[processor_class.slug] = processor_class
+                self._register_backend(processor_class)
         self._discovered = True
 
     def register(self, processor_class: type[BaseProcessor]) -> None:
         """Manual registration for testing or dynamic use."""
-        self._backends[processor_class.slug] = processor_class
+        self._register_backend(processor_class)
 
     def unregister(self, slug: str) -> None:
         """Remove a backend by slug."""
@@ -69,6 +69,17 @@ class PluginRegistry:
     def _ensure_discovered(self) -> None:
         if not self._discovered:
             self.discover()
+
+    def _register_backend(self, processor_class: type[BaseProcessor]) -> None:
+        slug = processor_class.slug
+        existing = self._backends.get(slug)
+        if existing is not None and existing is not processor_class:
+            raise ValueError(
+                f"Duplicate backend slug {slug!r}: "
+                f"{existing.__module__}.{existing.__name__} and "
+                f"{processor_class.__module__}.{processor_class.__name__}"
+            )
+        self._backends[slug] = processor_class
 
 
 registry = PluginRegistry()

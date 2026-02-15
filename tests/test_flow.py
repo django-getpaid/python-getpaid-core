@@ -109,6 +109,21 @@ class TestFetchAndUpdateStatus:
         ):
             await flow.fetch_and_update_status(payment)
 
+    @pytest.mark.asyncio
+    async def test_pull_passes_amount_to_transition(self, flow):
+        payment = MockPayment(backend="mock", status=PaymentStatus.PREPARED)
+        with patch.object(
+            MockProcessor,
+            "fetch_payment_status",
+            new_callable=AsyncMock,
+            return_value={
+                "status": "confirm_payment",
+                "amount": Decimal("40.00"),
+            },
+        ):
+            result = await flow.fetch_and_update_status(payment)
+        assert result.amount_paid == Decimal("40.00")
+
 
 class TestCharge:
     @pytest.mark.asyncio

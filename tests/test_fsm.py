@@ -144,6 +144,22 @@ class TestPaymentRefundFlow:
         p.confirm_refund()
         assert p.status == PaymentStatus.PARTIAL
 
+    def test_confirm_refund_accumulates_amount(self):
+        p = MockPayment(status=PaymentStatus.REFUND_STARTED)
+        p.amount_paid = 100
+        create_payment_machine(p)
+        p.confirm_refund(amount=30)
+        assert p.status == PaymentStatus.PARTIAL
+        assert p.amount_refunded == 30
+
+    def test_confirm_refund_defaults_to_remaining_amount(self):
+        p = MockPayment(status=PaymentStatus.REFUND_STARTED)
+        p.amount_paid = 100
+        p.amount_refunded = 40
+        create_payment_machine(p)
+        p.confirm_refund()
+        assert p.amount_refunded == 100
+
     def test_mark_as_refunded_when_fully_refunded(self):
         p = MockPayment(status=PaymentStatus.PARTIAL)
         p.amount_paid = 100

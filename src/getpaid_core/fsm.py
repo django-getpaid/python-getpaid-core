@@ -49,6 +49,15 @@ def _accumulate_paid_amount(event_data):
     model.amount_paid += amount
 
 
+def _accumulate_refunded_amount(event_data):
+    """After confirm_refund: accumulate refunded amount on the payment."""
+    model = event_data.model
+    amount = event_data.kwargs.get("amount", None)
+    if amount is None:
+        amount = model.amount_paid - model.amount_refunded
+    model.amount_refunded += amount
+
+
 PAYMENT_TRANSITIONS = [
     {
         "trigger": "confirm_prepared",
@@ -105,6 +114,7 @@ PAYMENT_TRANSITIONS = [
         "trigger": "confirm_refund",
         "source": PaymentStatus.REFUND_STARTED,
         "dest": PaymentStatus.PARTIAL,
+        "after": _accumulate_refunded_amount,
     },
     {
         "trigger": "mark_as_refunded",
@@ -174,11 +184,14 @@ def create_payment_machine(payment) -> Machine:
     The transitions library adds trigger methods directly to the
     object (confirm_prepared, confirm_lock, fail, etc.).
     """
+    initial = (
+        PaymentStatus(payment.status) if payment.status else PaymentStatus.NEW
+    )
     return Machine(
         model=payment,
         states=PaymentStatus,
         transitions=PAYMENT_TRANSITIONS,
-        initial=payment.status or PaymentStatus.NEW,
+        initial=initial,
         model_attribute="status",
         auto_transitions=False,
         send_event=True,
@@ -193,11 +206,16 @@ def _store_fraud_message(event):
 
 def create_fraud_machine(payment) -> Machine:
     """Attach fraud status FSM to a payment object."""
+    initial = (
+        FraudStatus(payment.fraud_status)
+        if payment.fraud_status
+        else FraudStatus.UNKNOWN
+    )
     return Machine(
         model=payment,
         states=FraudStatus,
         transitions=FRAUD_TRANSITIONS,
-        initial=payment.fraud_status or FraudStatus.UNKNOWN,
+        initial=initial,
         model_attribute="fraud_status",
         auto_transitions=False,
         send_event=True,

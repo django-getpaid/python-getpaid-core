@@ -91,7 +91,11 @@ class PaymentFlow:
                 )
             trigger = getattr(payment, callback, None)
             if trigger and callable(trigger):
-                trigger()
+                trigger_kwargs = {}
+                amount = response.get("amount")
+                if amount is not None:
+                    trigger_kwargs["amount"] = amount
+                trigger(**trigger_kwargs)
         await self.repository.save(payment)
         return payment
 

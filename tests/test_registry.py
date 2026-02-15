@@ -55,6 +55,20 @@ class EURProcessor(BaseProcessor):
         )
 
 
+class DuplicatePLNProcessor(BaseProcessor):
+    slug = "pln-pay"
+    display_name = "Duplicate PLN"
+    accepted_currencies = ["PLN"]
+
+    async def prepare_transaction(self, **kwargs):
+        return TransactionResult(
+            redirect_url=None,
+            form_data=None,
+            method="REST",
+            headers={},
+        )
+
+
 # -- Tests --
 
 
@@ -70,6 +84,12 @@ class TestManualRegistration:
         reg.register(EURProcessor)
         assert reg.get_by_slug("pln-pay") is PLNProcessor
         assert reg.get_by_slug("eur-pay") is EURProcessor
+
+    def test_register_duplicate_slug_raises(self):
+        reg = PluginRegistry()
+        reg.register(PLNProcessor)
+        with pytest.raises(ValueError, match="Duplicate backend slug"):
+            reg.register(DuplicatePLNProcessor)
 
     def test_unregister(self):
         reg = PluginRegistry()
