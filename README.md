@@ -1,39 +1,12 @@
-# getpaid-core
+# python-getpaid-core
 
-[![PyPI](https://img.shields.io/pypi/v/python-getpaid-core.svg)](https://pypi.org/project/python-getpaid-core/)
-[![Python Version](https://img.shields.io/pypi/pyversions/python-getpaid-core)](https://pypi.org/project/python-getpaid-core/)
+[![PyPI version](https://img.shields.io/pypi/v/python-getpaid-core)](https://pypi.org/project/python-getpaid-core/)
+[![Python version](https://img.shields.io/pypi/pyversions/python-getpaid-core)](https://pypi.org/project/python-getpaid-core/)
 [![License](https://img.shields.io/pypi/l/python-getpaid-core)](https://github.com/django-getpaid/python-getpaid-core/blob/main/LICENSE)
 
-Framework-agnostic payment processing library for Python. Provides the core
-abstractions — enums, protocols, FSM, processor base class, plugin registry,
-and exception hierarchy — that framework-specific adapters build on.
+**Framework-agnostic payment processing core.**
 
-## Architecture
-
-getpaid-core defines the **what** of payment processing without coupling to
-any web framework:
-
-- **Enums** (`PaymentStatus`, `FraudStatus`, `BackendMethod`, `ConfirmationMethod`)
-  define all valid states and methods.
-- **Protocols** (`Payment`, `Order`, `PaymentRepository`) define structural
-  contracts that framework models must satisfy.
-- **FSM** (`create_payment_machine`, `create_fraud_machine`) attaches
-  state-machine triggers to payment objects at runtime using the `transitions`
-  library.
-- **BaseProcessor** is an abstract class that payment gateway plugins subclass
-  to implement `prepare_transaction`, `handle_callback`, `charge`, etc.
-- **PluginRegistry** discovers and stores payment backend processors via
-  entry points or manual registration.
-- **Exceptions** provide a structured hierarchy for payment errors.
-
-## Framework Adapters
-
-- **[django-getpaid](https://github.com/django-getpaid/django-getpaid)** —
-  Django adapter (models, views, forms, admin)
-- **[fastapi-getpaid](https://github.com/django-getpaid/fastapi-getpaid)** —
-  FastAPI adapter (async routes, SQLAlchemy, Pydantic config)
-- **[litestar-getpaid](https://github.com/django-getpaid/litestar-getpaid)** —
-  Litestar adapter (controllers, Provide DI, SQLAlchemy, Pydantic config)
+`python-getpaid-core` is the foundation of the Getpaid ecosystem. It provides the abstract interfaces, finite state machines (FSM), and plugin registry needed to build a robust payment system without coupling your logic to a specific web framework or payment provider.
 
 ## Installation
 
@@ -41,40 +14,69 @@ any web framework:
 pip install python-getpaid-core
 ```
 
-You typically install this as a dependency of a framework adapter rather than
-directly.
+## Quick Start: Creating a Custom Processor
 
-## Quick Example
+To implement a new payment backend, subclass `BaseProcessor` and implement at least `prepare_transaction`.
 
 ```python
-from getpaid_core.enums import PaymentStatus
-from getpaid_core.fsm import create_payment_machine
+from getpaid_core import BaseProcessor
+from getpaid_core.types import TransactionResult
 
-# Any object satisfying the Payment protocol works
-payment = MyPayment(status=PaymentStatus.NEW, amount_required=100)
-machine = create_payment_machine(payment)
+class MyPaymentProcessor(BaseProcessor):
+    slug = "my-provider"
+    display_name = "My Payment Provider"
+    accepted_currencies = ["USD", "EUR"]
 
-# FSM trigger methods are attached directly to the object
-payment.confirm_prepared()
-assert payment.status == PaymentStatus.PREPARED
+    async def prepare_transaction(self, **kwargs) -> TransactionResult:
+        # Generate payment link or form data
+        return TransactionResult(
+            redirect_url=f"https://api.provider.com/pay/{self.payment.id}",
+            method="GET"
+        )
 ```
 
-## Requirements
+### Registering your Processor
 
-- Python 3.12+
-- transitions
-- httpx
-- anyio
+Register your processor using entry points in your `pyproject.toml` so it can be discovered by the registry:
+
+```toml
+[project.entry-points."getpaid.backends"]
+my-provider = "my_package.processors:MyPaymentProcessor"
+```
+
+## Architecture Overview
+
+- **BaseProcessor**: The abstract base class that all payment gateway plugins must implement. It provides the standard interface for transaction preparation, callback handling, charging, and refunds.
+- **PaymentFlow**: Manages the payment lifecycle using a Finite State Machine (FSM) powered by the `transitions` library. It ensures that payments move between states (e.g., `NEW` -> `PREPARED` -> `PAID`) according to strict business rules.
+- **PluginRegistry**: A central service for discovering and managing payment processors registered via `getpaid.backends` entry points.
+- **State Machine (FSM)**: Dynamically attaches state-machine triggers to payment objects at runtime, allowing for clean and predictable state transitions.
+
+## API Summary
+
+| Class / Module | Role |
+| --- | --- |
+| `BaseProcessor` | Abstract base for implementing payment gateways. |
+| `PaymentFlow` | FSM logic for managing payment lifecycles. |
+| `PaymentStatus` | Enum for all possible payment states (NEW, PAID, FAILED, etc.). |
+| `registry` | Singleton registry for backend discovery. |
+| `TransactionResult` | Standard response for transaction initiation. |
+| `GetPaidException` | Base exception for all payment-related errors. |
+
+## Ecosystem
+
+`getpaid-core` is the heart of a larger ecosystem designed to make payment processing easy in any Python web application.
+
+### Framework Wrappers
+- [django-getpaid](https://github.com/django-getpaid/django-getpaid) — Official Django integration.
+- [litestar-getpaid](https://github.com/django-getpaid/litestar-getpaid) — Official Litestar integration.
+- [fastapi-getpaid](https://github.com/django-getpaid/fastapi-getpaid) — Official FastAPI integration.
+
+### Processor Plugins
+- [python-getpaid-payu](https://github.com/django-getpaid/python-getpaid-payu) — PayU backend.
+- [python-getpaid-paynow](https://github.com/django-getpaid/python-getpaid-paynow) — Paynow backend.
+- [python-getpaid-bitpay](https://github.com/django-getpaid/python-getpaid-bitpay) — BitPay backend.
+- [python-getpaid-przelewy24](https://github.com/django-getpaid/python-getpaid-przelewy24) — Przelewy24 backend.
 
 ## License
 
-MIT
-
-## Disclaimer
-
-This project has nothing in common with the
-[getpaid](http://code.google.com/p/getpaid/) plone project.
-
-## Credits
-
-Created by [Dominik Kozaczko](https://github.com/dekoza).
+This project is licensed under the MIT License.
