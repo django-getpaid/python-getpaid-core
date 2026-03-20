@@ -1,11 +1,7 @@
-"""Protocols defining framework integration contracts.
-
-Framework adapters (django-getpaid, litestar-getpaid, etc.) provide
-concrete implementations. Any object with the right shape satisfies
-the protocol -- no inheritance required.
-"""
+"""Protocols defining framework integration contracts."""
 
 from decimal import Decimal
+from typing import Any
 from typing import Protocol
 from typing import runtime_checkable
 
@@ -35,13 +31,14 @@ class Payment(Protocol):
     currency: str
     status: str
     backend: str
-    external_id: str
-    description: str
+    external_id: str | None
+    description: str | None
     amount_paid: Decimal
     amount_locked: Decimal
     amount_refunded: Decimal
     fraud_status: str
     fraud_message: str
+    provider_data: dict[str, Any]
 
 
 @runtime_checkable

@@ -1,8 +1,4 @@
-"""Plugin registry for payment backends.
-
-Primary discovery via entry_points. Manual registration for
-testing and dynamic scenarios.
-"""
+"""Plugin registry for payment backends."""
 
 from importlib.metadata import entry_points
 
@@ -20,10 +16,9 @@ class PluginRegistry:
         self._discovered = False
 
     def discover(self) -> None:
-        """Load all backends registered via entry_points."""
-        eps = entry_points(group=ENTRY_POINT_GROUP)
-        for ep in eps:
-            processor_class = ep.load()
+        """Load all backends registered via entry points."""
+        for entry_point in entry_points(group=ENTRY_POINT_GROUP):
+            processor_class = entry_point.load()
             if isinstance(processor_class, type) and issubclass(
                 processor_class, BaseProcessor
             ):
@@ -42,15 +37,16 @@ class PluginRegistry:
         """Return all backends supporting the given currency."""
         self._ensure_discovered()
         return [
-            b
-            for b in self._backends.values()
-            if currency in b.accepted_currencies
+            backend
+            for backend in self._backends.values()
+            if currency in backend.accepted_currencies
         ]
 
     def get_choices(self, currency: str) -> list[tuple[str, str]]:
         """Return (slug, display_name) pairs for a currency."""
         return [
-            (b.slug, b.display_name) for b in self.get_for_currency(currency)
+            (backend.slug, backend.display_name)
+            for backend in self.get_for_currency(currency)
         ]
 
     def get_by_slug(self, slug: str) -> type[BaseProcessor]:
@@ -62,8 +58,8 @@ class PluginRegistry:
         """Return all currencies supported by all backends."""
         self._ensure_discovered()
         currencies: set[str] = set()
-        for b in self._backends.values():
-            currencies.update(b.accepted_currencies)
+        for backend in self._backends.values():
+            currencies.update(backend.accepted_currencies)
         return currencies
 
     def _ensure_discovered(self) -> None:

@@ -12,12 +12,11 @@ framework-agnostic library.
 - Fraud status enum (`FraudStatus`) with 4 states
 - Backend method and confirmation method enums
 - `BaseProcessor` abstract class for payment gateway plugins
-- Payment and fraud state machines using `transitions` library
-- Transition guards (`_require_fully_paid`, `_require_fully_refunded`)
-- Amount callbacks (`_store_locked_amount`, `_accumulate_paid_amount`)
-- Fraud message callback (`_store_fraud_message`)
+- Semantic payment and fraud update engine
+- Transition validation with `InvalidTransitionError`
+- Provider metadata merging and callback idempotency tracking
 - `PluginRegistry` with entry-point discovery and manual registration
 - Runtime-checkable protocols: `Payment`, `Order`, `PaymentRepository`
-- Typed data structures: `BuyerInfo`, `ItemInfo`, `ChargeResponse`,
-  `PaymentStatusResponse`, `TransactionResult`
+- Dataclass response types: `BuyerInfo`, `ItemInfo`, `ChargeResult`,
+  `PaymentUpdate`, `RefundResult`, `TransactionResult`
 - Structured exception hierarchy with `context` support

@@ -1,223 +1,261 @@
-"""Payment state machine using the transitions library.
+"""State engine for payment and fraud lifecycle transitions."""
 
-Defines all valid payment and fraud status transitions.
-The machine attaches trigger methods directly to payment objects.
-"""
+from decimal import Decimal
 
-from transitions import Machine
-from transitions.core import MachineError
-
+from getpaid_core.enums import FraudEvent
 from getpaid_core.enums import FraudStatus
+from getpaid_core.enums import PaymentEvent
 from getpaid_core.enums import PaymentStatus
+from getpaid_core.exceptions import InvalidTransitionError
+from getpaid_core.protocols import Payment
+from getpaid_core.types import PaymentUpdate
 
 
-def _require_fully_paid(event_data):
-    """Guard that raises MachineError when payment is not fully paid."""
-    model = event_data.model
-    if not model.is_fully_paid():
-        raise MachineError(
-            f"Transition '{event_data.event.name}' requires full payment."
+def _ensure_provider_data(payment: Payment) -> dict:
+    provider_data = getattr(payment, "provider_data", None)
+    if provider_data is None:
+        provider_data = {}
+        payment.provider_data = provider_data
+    return provider_data
+
+
+def _coerce_payment_status(payment: Payment) -> PaymentStatus:
+    status = payment.status or PaymentStatus.NEW
+    return PaymentStatus(status)
+
+
+def _coerce_fraud_status(payment: Payment) -> FraudStatus:
+    fraud_status = payment.fraud_status or FraudStatus.UNKNOWN
+    return FraudStatus(fraud_status)
+
+
+def _record_provider_event(
+    payment: Payment, provider_event_id: str | None
+) -> bool:
+    if not provider_event_id:
+        return True
+    provider_data = _ensure_provider_data(payment)
+    applied = provider_data.setdefault("applied_event_ids", [])
+    if provider_event_id in applied:
+        return False
+    applied.append(provider_event_id)
+    return True
+
+
+def _merge_provider_data(payment: Payment, provider_data: dict) -> None:
+    if not provider_data:
+        return
+    _ensure_provider_data(payment).update(provider_data)
+
+
+def _set_paid_amount(payment: Payment, paid_amount: Decimal | None) -> None:
+    if paid_amount is None:
+        paid_amount = payment.amount_required
+    previous_paid = payment.amount_paid
+    next_paid = max(previous_paid, paid_amount)
+    increment = next_paid - previous_paid
+    payment.amount_paid = next_paid
+    if increment > 0 and payment.amount_locked:
+        payment.amount_locked = max(
+            Decimal("0.00"), payment.amount_locked - increment
         )
 
 
-def _require_fully_refunded(event_data):
-    """Guard that raises MachineError when payment is not fully refunded."""
-    model = event_data.model
-    if not model.is_fully_refunded():
-        raise MachineError(
-            f"Transition '{event_data.event.name}' requires full refund."
-        )
+def _set_refunded_amount(
+    payment: Payment, refunded_amount: Decimal | None
+) -> None:
+    if refunded_amount is None:
+        refunded_amount = payment.amount_paid
+    payment.amount_refunded = max(payment.amount_refunded, refunded_amount)
 
 
-def _store_locked_amount(event_data):
-    """After confirm_lock: store the locked amount on the payment."""
-    model = event_data.model
-    amount = event_data.kwargs.get("amount", None)
-    if amount is None:
-        amount = model.amount_required
-    model.amount_locked = amount
+def _set_locked_amount(payment: Payment, locked_amount: Decimal | None) -> None:
+    if locked_amount is None:
+        locked_amount = payment.amount_required
+    payment.amount_locked = max(payment.amount_locked, locked_amount)
 
 
-def _accumulate_paid_amount(event_data):
-    """After confirm_payment: accumulate paid amount on the payment."""
-    model = event_data.model
-    amount = event_data.kwargs.get("amount", None)
-    if amount is None:
-        if not model.amount_locked:
-            model.amount_locked = model.amount_required
-        amount = model.amount_locked
-    model.amount_paid += amount
+def _active_paid_status(payment: Payment) -> PaymentStatus:
+    if (
+        payment.amount_paid >= payment.amount_required
+        and payment.amount_paid > 0
+    ):
+        return PaymentStatus.PAID
+    if payment.amount_paid > 0:
+        return PaymentStatus.PARTIAL
+    if payment.amount_locked > 0:
+        return PaymentStatus.PRE_AUTH
+    return PaymentStatus.PREPARED
 
 
-def _accumulate_refunded_amount(event_data):
-    """After confirm_refund: accumulate refunded amount on the payment."""
-    model = event_data.model
-    amount = event_data.kwargs.get("amount", None)
-    if amount is None:
-        amount = model.amount_paid - model.amount_refunded
-    model.amount_refunded += amount
+def _apply_payment_event(payment: Payment, update: PaymentUpdate) -> None:
+    event = update.payment_event
+    if event is None:
+        return
 
+    status = _coerce_payment_status(payment)
 
-PAYMENT_TRANSITIONS = [
-    {
-        "trigger": "confirm_prepared",
-        "source": PaymentStatus.NEW,
-        "dest": PaymentStatus.PREPARED,
-    },
-    {
-        "trigger": "confirm_lock",
-        "source": [PaymentStatus.NEW, PaymentStatus.PREPARED],
-        "dest": PaymentStatus.PRE_AUTH,
-        "after": _store_locked_amount,
-    },
-    {
-        "trigger": "confirm_charge_sent",
-        "source": PaymentStatus.PRE_AUTH,
-        "dest": PaymentStatus.IN_CHARGE,
-    },
-    {
-        "trigger": "confirm_payment",
-        "source": [
-            PaymentStatus.PRE_AUTH,
+    if event is PaymentEvent.PREPARED:
+        if status is PaymentStatus.NEW:
+            payment.status = PaymentStatus.PREPARED
+            return
+        return
+
+    if event is PaymentEvent.LOCKED:
+        if status in {
+            PaymentStatus.NEW,
             PaymentStatus.PREPARED,
+            PaymentStatus.PRE_AUTH,
+        }:
+            _set_locked_amount(payment, update.locked_amount)
+            payment.status = PaymentStatus.PRE_AUTH
+            return
+        return
+
+    if event is PaymentEvent.CHARGE_REQUESTED:
+        if status in {PaymentStatus.PRE_AUTH, PaymentStatus.IN_CHARGE}:
+            payment.status = PaymentStatus.IN_CHARGE
+            return
+        if status in {PaymentStatus.PARTIAL, PaymentStatus.PAID}:
+            return
+        raise InvalidTransitionError(
+            f"Cannot request charge for payment in {status.value!r} status."
+        )
+
+    if event is PaymentEvent.PAYMENT_CAPTURED:
+        if status in {PaymentStatus.REFUND_STARTED, PaymentStatus.REFUNDED}:
+            raise InvalidTransitionError(
+                f"Cannot capture payment in {status.value!r} status."
+            )
+        _set_paid_amount(payment, update.paid_amount)
+        payment.status = _active_paid_status(payment)
+        return
+
+    if event is PaymentEvent.FAILED:
+        if status is PaymentStatus.FAILED:
+            return
+        if payment.amount_paid > 0 or payment.amount_refunded > 0:
+            raise InvalidTransitionError(
+                f"Cannot fail payment in {status.value!r} status."
+            )
+        if status in {
+            PaymentStatus.NEW,
+            PaymentStatus.PREPARED,
+            PaymentStatus.PRE_AUTH,
             PaymentStatus.IN_CHARGE,
-            PaymentStatus.PARTIAL,
-        ],
-        "dest": PaymentStatus.PARTIAL,
-        "after": _accumulate_paid_amount,
-    },
-    {
-        "trigger": "mark_as_paid",
-        "source": PaymentStatus.PARTIAL,
-        "dest": PaymentStatus.PAID,
-        "before": _require_fully_paid,
-    },
-    {
-        "trigger": "release_lock",
-        "source": PaymentStatus.PRE_AUTH,
-        "dest": PaymentStatus.REFUNDED,
-    },
-    {
-        "trigger": "start_refund",
-        "source": [
+        }:
+            payment.status = PaymentStatus.FAILED
+            return
+        raise InvalidTransitionError(
+            f"Cannot fail payment in {status.value!r} status."
+        )
+
+    if event is PaymentEvent.REFUND_REQUESTED:
+        if status in {
             PaymentStatus.PAID,
             PaymentStatus.PARTIAL,
-        ],
-        "dest": PaymentStatus.REFUND_STARTED,
-    },
-    {
-        "trigger": "cancel_refund",
-        "source": PaymentStatus.REFUND_STARTED,
-        "dest": PaymentStatus.PARTIAL,
-    },
-    {
-        "trigger": "confirm_refund",
-        "source": PaymentStatus.REFUND_STARTED,
-        "dest": PaymentStatus.PARTIAL,
-        "after": _accumulate_refunded_amount,
-    },
-    {
-        "trigger": "mark_as_refunded",
-        "source": PaymentStatus.PARTIAL,
-        "dest": PaymentStatus.REFUNDED,
-        "before": _require_fully_refunded,
-    },
-    {
-        "trigger": "fail",
-        "source": [
-            PaymentStatus.NEW,
-            PaymentStatus.PRE_AUTH,
-            PaymentStatus.PREPARED,
-        ],
-        "dest": PaymentStatus.FAILED,
-    },
-]
+            PaymentStatus.REFUND_STARTED,
+        }:
+            payment.status = PaymentStatus.REFUND_STARTED
+            return
+        raise InvalidTransitionError(
+            f"Cannot start refund for payment in {status.value!r} status."
+        )
 
-FRAUD_TRANSITIONS = [
-    {
-        "trigger": "flag_as_fraud",
-        "source": FraudStatus.UNKNOWN,
-        "dest": FraudStatus.REJECTED,
-    },
-    {
-        "trigger": "flag_as_legit",
-        "source": FraudStatus.UNKNOWN,
-        "dest": FraudStatus.ACCEPTED,
-    },
-    {
-        "trigger": "flag_for_check",
-        "source": FraudStatus.UNKNOWN,
-        "dest": FraudStatus.CHECK,
-    },
-    {
-        "trigger": "mark_as_fraud",
-        "source": FraudStatus.CHECK,
-        "dest": FraudStatus.REJECTED,
-    },
-    {
-        "trigger": "mark_as_legit",
-        "source": FraudStatus.CHECK,
-        "dest": FraudStatus.ACCEPTED,
-    },
-]
+    if event is PaymentEvent.REFUND_CONFIRMED:
+        if status not in {
+            PaymentStatus.PAID,
+            PaymentStatus.PARTIAL,
+            PaymentStatus.REFUND_STARTED,
+            PaymentStatus.REFUNDED,
+        }:
+            raise InvalidTransitionError(
+                f"Cannot confirm refund for payment in {status.value!r} status."
+            )
+        _set_refunded_amount(payment, update.refunded_amount)
+        if (
+            payment.amount_refunded >= payment.amount_paid
+            and payment.amount_paid > 0
+        ):
+            payment.status = PaymentStatus.REFUNDED
+        else:
+            payment.status = PaymentStatus.PARTIAL
+        return
 
-ALLOWED_CALLBACKS: frozenset[str] = frozenset(
-    {
-        "confirm_prepared",
-        "confirm_lock",
-        "confirm_charge_sent",
-        "confirm_payment",
-        "mark_as_paid",
-        "release_lock",
-        "start_refund",
-        "cancel_refund",
-        "confirm_refund",
-        "mark_as_refunded",
-        "fail",
-    }
-)
+    if event is PaymentEvent.REFUND_CANCELLED:
+        if status in {
+            PaymentStatus.REFUND_STARTED,
+            PaymentStatus.PAID,
+            PaymentStatus.PARTIAL,
+        }:
+            payment.status = _active_paid_status(payment)
+            return
+        raise InvalidTransitionError(
+            f"Cannot cancel refund for payment in {status.value!r} status."
+        )
+
+    if event is PaymentEvent.LOCK_RELEASED:
+        if status in {PaymentStatus.PRE_AUTH, PaymentStatus.REFUNDED}:
+            payment.amount_locked = Decimal("0.00")
+            payment.status = PaymentStatus.REFUNDED
+            return
+        raise InvalidTransitionError(
+            f"Cannot release lock for payment in {status.value!r} status."
+        )
+
+    raise InvalidTransitionError(f"Unsupported payment event: {event!r}")
 
 
-def create_payment_machine(payment) -> Machine:
-    """Attach payment FSM to a payment object.
+def _apply_fraud_event(payment: Payment, update: PaymentUpdate) -> None:
+    event = update.fraud_event
+    if event is None:
+        return
 
-    The transitions library adds trigger methods directly to the
-    object (confirm_prepared, confirm_lock, fail, etc.).
-    """
-    initial = (
-        PaymentStatus(payment.status) if payment.status else PaymentStatus.NEW
-    )
-    return Machine(
-        model=payment,
-        states=PaymentStatus,
-        transitions=PAYMENT_TRANSITIONS,
-        initial=initial,
-        model_attribute="status",
-        auto_transitions=False,
-        send_event=True,
+    current = _coerce_fraud_status(payment)
+
+    if event is FraudEvent.REVIEW:
+        if current in {FraudStatus.UNKNOWN, FraudStatus.CHECK}:
+            payment.fraud_status = FraudStatus.CHECK
+            return
+    elif event is FraudEvent.ACCEPT:
+        if current in {
+            FraudStatus.UNKNOWN,
+            FraudStatus.CHECK,
+            FraudStatus.ACCEPTED,
+        }:
+            payment.fraud_status = FraudStatus.ACCEPTED
+            return
+    elif event is FraudEvent.REJECT and current in {
+        FraudStatus.UNKNOWN,
+        FraudStatus.CHECK,
+        FraudStatus.REJECTED,
+    }:
+        payment.fraud_status = FraudStatus.REJECTED
+        return
+
+    event_name = event.value if isinstance(event, FraudEvent) else str(event)
+    raise InvalidTransitionError(
+        "Cannot apply fraud event "
+        f"{event_name!r} for fraud status {current.value!r}."
     )
 
 
-def _store_fraud_message(event):
-    """Before callback: store message kwarg on the payment object."""
-    message = event.kwargs.get("message", "")
-    event.model.fraud_message = message
+def apply_payment_update(
+    payment: Payment, update: PaymentUpdate | None
+) -> Payment:
+    """Apply a semantic payment update to a payment object."""
+    if update is None:
+        return payment
 
+    if not _record_provider_event(payment, update.provider_event_id):
+        return payment
 
-def create_fraud_machine(payment) -> Machine:
-    """Attach fraud status FSM to a payment object."""
-    initial = (
-        FraudStatus(payment.fraud_status)
-        if payment.fraud_status
-        else FraudStatus.UNKNOWN
-    )
-    return Machine(
-        model=payment,
-        states=FraudStatus,
-        transitions=FRAUD_TRANSITIONS,
-        initial=initial,
-        model_attribute="fraud_status",
-        auto_transitions=False,
-        send_event=True,
-        before_state_change=[_store_fraud_message],
-    )
+    if update.external_id is not None:
+        payment.external_id = update.external_id
+    if update.fraud_message is not None:
+        payment.fraud_message = update.fraud_message
+
+    _merge_provider_data(payment, update.provider_data)
+    _apply_payment_event(payment, update)
+    _apply_fraud_event(payment, update)
+    return payment

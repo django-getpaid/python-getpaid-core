@@ -1,16 +1,16 @@
-"""Dummy payment backend for development and testing.
+"""Dummy payment backend for development and testing."""
 
-Makes zero HTTP calls. Serves as a reference implementation
-for backend authors.
-"""
-
+from collections.abc import Sequence
 from decimal import Decimal
 from typing import ClassVar
 
-from getpaid_core.fsm import ALLOWED_CALLBACKS
+from getpaid_core.enums import BackendMethod
+from getpaid_core.enums import FraudEvent
+from getpaid_core.enums import PaymentEvent
 from getpaid_core.processor import BaseProcessor
-from getpaid_core.types import ChargeResponse
-from getpaid_core.types import PaymentStatusResponse
+from getpaid_core.types import ChargeResult
+from getpaid_core.types import PaymentUpdate
+from getpaid_core.types import RefundResult
 from getpaid_core.types import TransactionResult
 
 
@@ -19,68 +19,115 @@ class DummyProcessor(BaseProcessor):
 
     slug: ClassVar[str] = "dummy"
     display_name: ClassVar[str] = "Dummy"
-    accepted_currencies: ClassVar[list[str]] = [
+    accepted_currencies: ClassVar[Sequence[str]] = (
         "PLN",
         "EUR",
         "USD",
         "GBP",
         "CHF",
         "CZK",
-    ]
+    )
 
     async def prepare_transaction(self, **kwargs) -> TransactionResult:
-        method = self.get_setting("method", "REST")
-        if method == "POST":
+        method = BackendMethod(self.get_setting("method", BackendMethod.REST))
+        if method is BackendMethod.POST:
             return TransactionResult(
+                method=method,
                 redirect_url="https://dummy.example.com/form",
                 form_data={
                     "payment_id": self.payment.id,
-                    "amount": str(self.payment.amount_required),
+                    "amount": f"{self.payment.amount_required:.2f}",
                     "currency": self.payment.currency,
                 },
-                method="POST",
-                headers={},
             )
-        elif method == "GET":
-            return TransactionResult(
-                redirect_url=(
-                    f"https://dummy.example.com/pay/{self.payment.id}"
-                ),
-                form_data=None,
-                method="GET",
-                headers={},
-            )
-        else:
-            return TransactionResult(
-                redirect_url=(
-                    f"https://dummy.example.com/pay/{self.payment.id}"
-                ),
-                form_data=None,
-                method="REST",
-                headers={},
-            )
+
+        return TransactionResult(
+            method=method,
+            redirect_url=f"https://dummy.example.com/pay/{self.payment.id}",
+        )
 
     async def handle_callback(
         self, data: dict, headers: dict, **kwargs
-    ) -> None:
-        new_status = data.get("new_status")
-        if new_status and new_status in ALLOWED_CALLBACKS:
-            trigger = getattr(self.payment, new_status, None)
-            if trigger and callable(trigger):
-                trigger()
+    ) -> PaymentUpdate | None:
+        event = data.get("event")
+        if event == "payment_confirmed":
+            amount = Decimal(
+                str(data.get("paid_amount", self.payment.amount_required))
+            )
+            return PaymentUpdate(
+                payment_event=PaymentEvent.PAYMENT_CAPTURED,
+                paid_amount=amount,
+                provider_event_id=str(
+                    data.get("event_id", f"payment:{self.payment.id}")
+                ),
+            )
+        if event == "payment_failed":
+            return PaymentUpdate(payment_event=PaymentEvent.FAILED)
+        if event == "payment_locked":
+            amount = Decimal(
+                str(data.get("locked_amount", self.payment.amount_required))
+            )
+            return PaymentUpdate(
+                payment_event=PaymentEvent.LOCKED,
+                locked_amount=amount,
+            )
+        if event == "refund_confirmed":
+            amount = Decimal(
+                str(data.get("refunded_amount", self.payment.amount_paid))
+            )
+            return PaymentUpdate(
+                payment_event=PaymentEvent.REFUND_CONFIRMED,
+                refunded_amount=amount,
+                provider_event_id=str(
+                    data.get("event_id", f"refund:{self.payment.id}")
+                ),
+            )
+        if event == "refund_cancelled":
+            return PaymentUpdate(payment_event=PaymentEvent.REFUND_CANCELLED)
+        if event == "fraud_review":
+            return PaymentUpdate(
+                fraud_event=FraudEvent.REVIEW,
+                fraud_message="Manual review required",
+            )
+        if event == "fraud_rejected":
+            return PaymentUpdate(
+                fraud_event=FraudEvent.REJECT,
+                fraud_message="Rejected by dummy backend",
+            )
+        if event == "fraud_accepted":
+            return PaymentUpdate(
+                fraud_event=FraudEvent.ACCEPT,
+                fraud_message="Accepted by dummy backend",
+            )
+        return None
 
-    async def fetch_payment_status(self, **kwargs) -> PaymentStatusResponse:
-        status = self.get_setting("confirmation_status", "confirm_payment")
-        return PaymentStatusResponse(status=status)
+    async def fetch_payment_status(self, **kwargs) -> PaymentUpdate | None:
+        event = self.get_setting("confirmation_event", "payment_confirmed")
+        if event == "payment_locked":
+            return PaymentUpdate(
+                payment_event=PaymentEvent.LOCKED,
+                locked_amount=self.payment.amount_required,
+                provider_event_id=f"pull-lock:{self.payment.id}",
+            )
+        if event == "payment_failed":
+            return PaymentUpdate(
+                payment_event=PaymentEvent.FAILED,
+                provider_event_id=f"pull-fail:{self.payment.id}",
+            )
+        return PaymentUpdate(
+            payment_event=PaymentEvent.PAYMENT_CAPTURED,
+            paid_amount=self.payment.amount_required,
+            provider_event_id=f"pull-pay:{self.payment.id}",
+        )
 
     async def charge(
         self, amount: Decimal | None = None, **kwargs
-    ) -> ChargeResponse:
+    ) -> ChargeResult:
         charged = amount if amount is not None else self.payment.amount_required
-        return ChargeResponse(
+        return ChargeResult(
             amount_charged=charged,
             success=True,
-            async_call=False,
+            async_call=bool(kwargs.get("async_call", False)),
         )
 
     async def release_lock(self, **kwargs) -> Decimal:
@@ -88,8 +135,11 @@ class DummyProcessor(BaseProcessor):
 
     async def start_refund(
         self, amount: Decimal | None = None, **kwargs
-    ) -> Decimal:
-        return amount if amount is not None else self.payment.amount_paid
+    ) -> RefundResult:
+        return RefundResult(
+            amount=amount if amount is not None else self.payment.amount_paid,
+            provider_data={"refund_id": f"dummy-refund-{self.payment.id}"},
+        )
 
     async def cancel_refund(self, **kwargs) -> bool:
         return True

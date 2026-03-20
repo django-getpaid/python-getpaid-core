@@ -1,7 +1,4 @@
-"""Payment processing enums.
-
-Values are kept identical to django-getpaid for backward compatibility.
-"""
+"""Payment processing enums."""
 
 from enum import StrEnum
 
@@ -27,6 +24,28 @@ class FraudStatus(StrEnum):
     ACCEPTED = "accepted"
     REJECTED = "rejected"
     CHECK = "check"
+
+
+class PaymentEvent(StrEnum):
+    """Semantic payment lifecycle events reported by processors."""
+
+    PREPARED = "prepared"
+    LOCKED = "locked"
+    CHARGE_REQUESTED = "charge_requested"
+    PAYMENT_CAPTURED = "payment_captured"
+    FAILED = "failed"
+    REFUND_REQUESTED = "refund_requested"
+    REFUND_CONFIRMED = "refund_confirmed"
+    REFUND_CANCELLED = "refund_cancelled"
+    LOCK_RELEASED = "lock_released"
+
+
+class FraudEvent(StrEnum):
+    """Semantic fraud review events reported by processors."""
+
+    REVIEW = "review"
+    ACCEPT = "accept"
+    REJECT = "reject"
 
 
 class BackendMethod(StrEnum):

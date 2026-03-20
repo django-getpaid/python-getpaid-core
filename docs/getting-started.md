@@ -77,21 +77,30 @@ from getpaid_core.registry import registry
 registry.register(MyGatewayProcessor)
 ```
 
-## Payment State Machine
+## Payment Updates
 
-Payments move through states via an FSM powered by the `transitions` library.
-The machine attaches trigger methods directly to payment objects:
+Payments move through states by applying semantic `PaymentUpdate` objects.
+Processors return updates from callbacks and status polling, and the flow
+applies them to the payment object:
 
 ```python
-from getpaid_core.fsm import create_payment_machine
+from decimal import Decimal
 
-machine = create_payment_machine(payment)
+from getpaid_core.fsm import apply_payment_update
+from getpaid_core.types import PaymentUpdate
 
-# Now payment has trigger methods:
-payment.confirm_prepared()   # NEW -> PREPARED
-payment.confirm_lock(amount=100)  # PREPARED -> PRE_AUTH
-payment.confirm_payment(amount=100)  # PRE_AUTH -> PARTIAL
-payment.mark_as_paid()       # PARTIAL -> PAID (if fully paid)
+apply_payment_update(
+    payment,
+    PaymentUpdate(payment_event="prepared"),
+)
+
+apply_payment_update(
+    payment,
+    PaymentUpdate(
+        payment_event="payment_captured",
+        paid_amount=Decimal("100.00"),
+    ),
+)
 ```
 
-See {doc}`concepts` for the full state diagram and transition rules.
+See {doc}`concepts` for the lifecycle rules and semantic event mapping.

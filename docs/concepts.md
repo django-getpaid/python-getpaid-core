@@ -16,45 +16,35 @@ Payments move through these states:
 | `REFUND_STARTED` | `"refund_started"` | Refund initiated |
 | `REFUNDED` | `"refunded"` | Fully refunded or lock released |
 
-## Payment State Transitions
+## Payment Events
 
 ```
-NEW ──────────────────────► PREPARED
- │                             │
- │  confirm_lock               │ confirm_lock
- ▼                             ▼
-PRE_AUTH ◄─────────────────────┘
- │
- ├── confirm_charge_sent ──► IN_CHARGE
- │                             │
- │   confirm_payment           │ confirm_payment
- ▼                             ▼
-PARTIAL ◄──────────────────────┘
- │
- ├── mark_as_paid ──────────► PAID
- │
- ├── start_refund ──────────► REFUND_STARTED
- │                             │
- │   cancel_refund             │ confirm_refund
- ◄─────────────────────────────┘
- │
- └── mark_as_refunded ──────► REFUNDED
-
-NEW/PREPARED/PRE_AUTH ──fail──► FAILED
-PRE_AUTH ──release_lock──────► REFUNDED
+prepared         -> PREPARED
+locked           -> PRE_AUTH
+charge_requested -> IN_CHARGE
+payment_captured -> PARTIAL or PAID
+failed           -> FAILED
+refund_requested -> REFUND_STARTED
+refund_confirmed -> PARTIAL or REFUNDED
+refund_cancelled -> active paid status
+lock_released    -> REFUNDED
 ```
 
-### Transition Guards
+### Transition Rules
 
-Some transitions have guards that raise `MachineError` if conditions aren't met:
+The state engine raises `InvalidTransitionError` when an event is incompatible
+with the current payment state.
 
-- **`mark_as_paid`** requires `is_fully_paid()` — `amount_paid >= amount_required`
-- **`mark_as_refunded`** requires `is_fully_refunded()` — `amount_refunded >= amount_paid`
+- You cannot capture a payment after it is already refunded.
+- You cannot start a refund before the payment has been paid.
+- Refund confirmation moves to `REFUNDED` only when `amount_refunded >= amount_paid`.
 
-### Amount Callbacks
+### Amount Handling
 
-- **`confirm_lock`** stores the locked amount via `_store_locked_amount`
-- **`confirm_payment`** accumulates paid amount via `_accumulate_paid_amount`
+- `locked_amount` stores a pre-authorized amount.
+- `paid_amount` updates captured funds and may reduce `amount_locked`.
+- `refunded_amount` tracks refund progress.
+- `provider_data` stores provider-specific metadata such as refund IDs and applied callback IDs.
 
 ## Fraud Statuses
 
@@ -103,13 +93,14 @@ class Payment(Protocol):
     currency: str
     status: str
     backend: str
-    external_id: str
-    description: str
+    external_id: str | None
+    description: str | None
     amount_paid: Decimal
     amount_locked: Decimal
     amount_refunded: Decimal
     fraud_status: str
     fraud_message: str
+    provider_data: dict[str, Any]
 ```
 
 ### PaymentRepository Protocol
@@ -162,6 +153,7 @@ raise ChargeFailure("Gateway returned 500", context={"status_code": 500})
 |------|-------------|
 | `BuyerInfo` | TypedDict with `email`, `first_name`, `last_name`, `phone` (all optional) |
 | `ItemInfo` | TypedDict with `name`, `quantity`, `unit_price` |
-| `ChargeResponse` | TypedDict with `amount_charged`, `success`, `async_call` |
-| `PaymentStatusResponse` | TypedDict with `amount`, `status`, `external_id` (all optional) |
-| `TransactionResult` | TypedDict with `redirect_url`, `form_data`, `method`, `headers` |
+| `ChargeResult` | Dataclass with `amount_charged`, `success`, `async_call`, `provider_data` |
+| `PaymentUpdate` | Dataclass describing semantic payment/fraud events and amounts |
+| `RefundResult` | Dataclass with refund amount and provider metadata |
+| `TransactionResult` | Dataclass with redirect, method, external ID, and provider metadata |

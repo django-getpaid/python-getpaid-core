@@ -6,7 +6,7 @@
 
 **Framework-agnostic payment processing core.**
 
-`python-getpaid-core` is the foundation of the Getpaid ecosystem. It provides the abstract interfaces, finite state machines (FSM), and plugin registry needed to build a robust payment system without coupling your logic to a specific web framework or payment provider.
+`python-getpaid-core` is the foundation of the Getpaid ecosystem. It provides the abstract interfaces, semantic payment update engine, and plugin registry needed to build a robust payment system without coupling your logic to a specific web framework or payment provider.
 
 ## Installation
 
@@ -47,16 +47,16 @@ my-provider = "my_package.processors:MyPaymentProcessor"
 ## Architecture Overview
 
 - **BaseProcessor**: The abstract base class that all payment gateway plugins must implement. It provides the standard interface for transaction preparation, callback handling, charging, and refunds.
-- **PaymentFlow**: Manages the payment lifecycle using a Finite State Machine (FSM) powered by the `transitions` library. It ensures that payments move between states (e.g., `NEW` -> `PREPARED` -> `PAID`) according to strict business rules.
+- **PaymentFlow**: Manages the payment lifecycle using semantic payment update objects. It ensures that payments move between states (e.g., `NEW` -> `PREPARED` -> `PAID`) according to strict business rules.
 - **PluginRegistry**: A central service for discovering and managing payment processors registered via `getpaid.backends` entry points.
-- **State Machine (FSM)**: Dynamically attaches state-machine triggers to payment objects at runtime, allowing for clean and predictable state transitions.
+- **State Engine**: Applies semantic payment and fraud events to payment objects, merges provider metadata, and tracks idempotent provider event IDs.
 
 ## API Summary
 
 | Class / Module | Role |
 | --- | --- |
 | `BaseProcessor` | Abstract base for implementing payment gateways. |
-| `PaymentFlow` | FSM logic for managing payment lifecycles. |
+| `PaymentFlow` | Semantic orchestration for payment lifecycles. |
 | `PaymentStatus` | Enum for all possible payment states (NEW, PAID, FAILED, etc.). |
 | `registry` | Singleton registry for backend discovery. |
 | `TransactionResult` | Standard response for transaction initiation. |

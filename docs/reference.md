@@ -16,7 +16,7 @@
    :undoc-members:
 ```
 
-## FSM
+## State Engine
 
 ```{eval-rst}
 .. automodule:: getpaid_core.fsm
