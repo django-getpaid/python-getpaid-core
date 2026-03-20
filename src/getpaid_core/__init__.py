@@ -1,6 +1,6 @@
 """Getpaid Core -- framework-agnostic payment processing."""
 
-__version__ = "3.0.0a2"
+__version__ = "3.0.0a3"
 
 from getpaid_core.enums import BackendMethod
 from getpaid_core.enums import ConfirmationMethod

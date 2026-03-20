@@ -5,7 +5,7 @@ import getpaid_core
 
 class TestPublicAPI:
     def test_version(self) -> None:
-        assert getpaid_core.__version__ == "3.0.0a2"
+        assert getpaid_core.__version__ == "3.0.0a3"
 
     def test_exports_enums(self) -> None:
         assert getpaid_core.PaymentStatus is not None
