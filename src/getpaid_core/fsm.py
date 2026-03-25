@@ -1,6 +1,10 @@
 """State engine for payment and fraud lifecycle transitions."""
 
+from copy import deepcopy
+from dataclasses import dataclass
 from decimal import Decimal
+from typing import Any
+from typing import cast
 
 from getpaid_core.enums import FraudEvent
 from getpaid_core.enums import FraudStatus
@@ -9,6 +13,18 @@ from getpaid_core.enums import PaymentStatus
 from getpaid_core.exceptions import InvalidTransitionError
 from getpaid_core.protocols import Payment
 from getpaid_core.types import PaymentUpdate
+
+
+@dataclass(frozen=True)
+class PaymentSnapshot:
+    status: str
+    amount_paid: Decimal
+    amount_locked: Decimal
+    amount_refunded: Decimal
+    external_id: str | None
+    fraud_status: str
+    fraud_message: str
+    provider_data: dict[str, Any] | None
 
 
 def _ensure_provider_data(payment: Payment) -> dict:
@@ -86,6 +102,33 @@ def _active_paid_status(payment: Payment) -> PaymentStatus:
     if payment.amount_locked > 0:
         return PaymentStatus.PRE_AUTH
     return PaymentStatus.PREPARED
+
+
+def _snapshot_payment_state(payment: Payment) -> PaymentSnapshot:
+    return PaymentSnapshot(
+        status=payment.status,
+        amount_paid=payment.amount_paid,
+        amount_locked=payment.amount_locked,
+        amount_refunded=payment.amount_refunded,
+        external_id=payment.external_id,
+        fraud_status=payment.fraud_status,
+        fraud_message=payment.fraud_message,
+        provider_data=deepcopy(getattr(payment, "provider_data", None)),
+    )
+
+
+def _restore_payment_state(payment: Payment, snapshot: PaymentSnapshot) -> None:
+    payment.status = snapshot.status
+    payment.amount_paid = snapshot.amount_paid
+    payment.amount_locked = snapshot.amount_locked
+    payment.amount_refunded = snapshot.amount_refunded
+    payment.external_id = snapshot.external_id
+    payment.fraud_status = snapshot.fraud_status
+    payment.fraud_message = snapshot.fraud_message
+    payment.provider_data = cast(
+        "dict[str, Any]",
+        {} if snapshot.provider_data is None else snapshot.provider_data,
+    )
 
 
 def _apply_payment_event(payment: Payment, update: PaymentUpdate) -> None:
@@ -247,15 +290,22 @@ def apply_payment_update(
     if update is None:
         return payment
 
-    if not _record_provider_event(payment, update.provider_event_id):
-        return payment
+    snapshot = _snapshot_payment_state(payment)
 
-    if update.external_id is not None:
-        payment.external_id = update.external_id
-    if update.fraud_message is not None:
-        payment.fraud_message = update.fraud_message
+    try:
+        if not _record_provider_event(payment, update.provider_event_id):
+            return payment
 
-    _merge_provider_data(payment, update.provider_data)
-    _apply_payment_event(payment, update)
-    _apply_fraud_event(payment, update)
+        if update.external_id is not None:
+            payment.external_id = update.external_id
+        if update.fraud_message is not None:
+            payment.fraud_message = update.fraud_message
+
+        _merge_provider_data(payment, update.provider_data)
+        _apply_payment_event(payment, update)
+        _apply_fraud_event(payment, update)
+    except Exception:
+        _restore_payment_state(payment, snapshot)
+        raise
+
     return payment

@@ -107,6 +107,59 @@ class TestApplyPaymentUpdate:
                 PaymentUpdate(payment_event=PaymentEvent.FAILED),
             )
 
+    def test_invalid_transition_keeps_payment_metadata_atomic(self) -> None:
+        payment = MockPayment(
+            status=PaymentStatus.PAID,
+            amount_paid=Decimal("100.00"),
+            external_id="ext-original",
+            fraud_message="unchanged",
+            provider_data={"existing": "value"},
+        )
+
+        with pytest.raises(InvalidTransitionError):
+            apply_payment_update(
+                payment,
+                PaymentUpdate(
+                    payment_event=PaymentEvent.FAILED,
+                    external_id="ext-new",
+                    fraud_message="should not stick",
+                    provider_event_id="evt-invalid",
+                    provider_data={"new": "data"},
+                ),
+            )
+
+        assert payment.status == PaymentStatus.PAID
+        assert payment.amount_paid == Decimal("100.00")
+        assert payment.external_id == "ext-original"
+        assert payment.fraud_message == "unchanged"
+        assert payment.provider_data == {"existing": "value"}
+
+    def test_invalid_fraud_event_rolls_back_payment_changes(self) -> None:
+        payment = MockPayment(
+            status=PaymentStatus.PREPARED,
+            fraud_status=FraudStatus.ACCEPTED,
+            provider_data={"existing": "value"},
+        )
+
+        with pytest.raises(InvalidTransitionError):
+            apply_payment_update(
+                payment,
+                PaymentUpdate(
+                    payment_event=PaymentEvent.PAYMENT_CAPTURED,
+                    paid_amount=Decimal("100.00"),
+                    fraud_event=FraudEvent.REVIEW,
+                    external_id="ext-new",
+                    provider_event_id="evt-mixed-invalid",
+                    provider_data={"new": "data"},
+                ),
+            )
+
+        assert payment.status == PaymentStatus.PREPARED
+        assert payment.amount_paid == Decimal("0")
+        assert payment.external_id is None
+        assert payment.fraud_status == FraudStatus.ACCEPTED
+        assert payment.provider_data == {"existing": "value"}
+
     def test_fraud_event_updates_message(self) -> None:
         payment = MockPayment(fraud_status=FraudStatus.UNKNOWN)
 
