@@ -64,9 +64,9 @@ def _merge_provider_data(payment: Payment, provider_data: dict) -> None:
     _ensure_provider_data(payment).update(provider_data)
 
 
-def _set_paid_amount(payment: Payment, paid_amount: Decimal | None) -> None:
-    if paid_amount is None:
-        paid_amount = payment.amount_required
+def _set_paid_amount(payment: Payment, paid_amount: Decimal) -> None:
+    """Set paid amount. Raises if paid_amount is None — callers must
+    provide an explicit amount."""
     previous_paid = payment.amount_paid
     next_paid = max(previous_paid, paid_amount)
     increment = next_paid - previous_paid
@@ -150,6 +150,10 @@ def _apply_payment_event(payment: Payment, update: PaymentUpdate) -> None:
             PaymentStatus.PREPARED,
             PaymentStatus.PRE_AUTH,
         }:
+            if update.locked_amount is None:
+                raise InvalidTransitionError(
+                    "LOCKED event requires explicit locked_amount."
+                )
             _set_locked_amount(payment, update.locked_amount)
             payment.status = PaymentStatus.PRE_AUTH
             return
@@ -169,6 +173,10 @@ def _apply_payment_event(payment: Payment, update: PaymentUpdate) -> None:
         if status in {PaymentStatus.REFUND_STARTED, PaymentStatus.REFUNDED}:
             raise InvalidTransitionError(
                 f"Cannot capture payment in {status.value!r} status."
+            )
+        if update.paid_amount is None:
+            raise InvalidTransitionError(
+                "PAYMENT_CAPTURED event requires explicit paid_amount."
             )
         _set_paid_amount(payment, update.paid_amount)
         payment.status = _active_paid_status(payment)
@@ -214,6 +222,10 @@ def _apply_payment_event(payment: Payment, update: PaymentUpdate) -> None:
         }:
             raise InvalidTransitionError(
                 f"Cannot confirm refund for payment in {status.value!r} status."
+            )
+        if update.refunded_amount is None:
+            raise InvalidTransitionError(
+                "REFUND_CONFIRMED event requires explicit refunded_amount."
             )
         _set_refunded_amount(payment, update.refunded_amount)
         if (

@@ -18,11 +18,7 @@ classifiers = [
     'Topic :: Office/Business :: Financial :: Point-Of-Sale',
     'Typing :: Typed',
 ]
-dependencies = [
-    'transitions>=0.9.0',
-    'httpx>=0.27.0',
-    'anyio>=4.0',
-]
+dependencies = []
 
 [dependency-groups]
 dev = [
