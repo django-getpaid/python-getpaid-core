@@ -9,6 +9,7 @@ import pytest
 from getpaid_core.enums import PaymentEvent
 from getpaid_core.enums import PaymentStatus
 from getpaid_core.exceptions import InvalidCallbackError
+from getpaid_core.exceptions import InvalidTransitionError
 from getpaid_core.flow import PaymentFlow
 from getpaid_core.types import ChargeResult
 from getpaid_core.types import PaymentUpdate
@@ -218,3 +219,45 @@ class TestProcessorAccess:
 
         assert isinstance(processor, MockProcessor)
         assert processor.config == {"sandbox": True}
+
+
+class TestPreconditions:
+    """Precondition validation prevents unnecessary API calls."""
+
+    @pytest.mark.asyncio
+    async def test_charge_requires_pre_auth_or_in_charge(self, flow):
+        payment = MockPayment(backend="mock", status=PaymentStatus.NEW)
+
+        with pytest.raises(InvalidTransitionError, match="Cannot charge"):
+            await flow.charge(payment)
+
+    @pytest.mark.asyncio
+    async def test_charge_invalidates_before_api_call(self, flow):
+        """Charge rejection must happen before the processor is called."""
+        payment = MockPayment(backend="mock", status=PaymentStatus.NEW)
+
+        with patch.object(
+            MockProcessor,
+            "charge",
+            new_callable=AsyncMock,
+        ) as mock_charge:
+            with pytest.raises(InvalidTransitionError):
+                await flow.charge(payment)
+            mock_charge.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_release_lock_requires_pre_auth(self, flow):
+        payment = MockPayment(backend="mock", status=PaymentStatus.PAID)
+
+        with pytest.raises(InvalidTransitionError, match="Cannot release lock"):
+            await flow.release_lock(payment)
+
+    @pytest.mark.asyncio
+    async def test_start_refund_requires_paid_or_partial(self, flow):
+        payment = MockPayment(
+            backend="mock",
+            status=PaymentStatus.NEW,
+        )
+
+        with pytest.raises(InvalidTransitionError, match="Cannot start refund"):
+            await flow.start_refund(payment)

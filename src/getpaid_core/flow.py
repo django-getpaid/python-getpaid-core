@@ -4,6 +4,8 @@ from decimal import Decimal
 from typing import Any
 
 from getpaid_core.enums import PaymentEvent
+from getpaid_core.enums import PaymentStatus
+from getpaid_core.exceptions import InvalidTransitionError
 from getpaid_core.fsm import apply_payment_update
 from getpaid_core.protocols import Order
 from getpaid_core.protocols import Payment
@@ -118,6 +120,16 @@ class PaymentFlow:
             payment=payment,
             kwargs={"amount": amount, **kwargs},
         )
+        # Validate precondition before calling processor (avoids
+        # unnecessary API calls when the payment is not chargeable).
+        if payment.status not in {
+            PaymentStatus.PRE_AUTH,
+            PaymentStatus.IN_CHARGE,
+        }:
+            raise InvalidTransitionError(
+                f"Cannot charge payment in {payment.status!r} status. "
+                "Payment must be PRE_AUTH or IN_CHARGE."
+            )
         processor = self.get_processor(payment)
         result = await processor.charge(**context["kwargs"])
         if result.success:
@@ -143,6 +155,11 @@ class PaymentFlow:
             payment=payment,
             kwargs=dict(kwargs),
         )
+        if payment.status != PaymentStatus.PRE_AUTH:
+            raise InvalidTransitionError(
+                f"Cannot release lock for payment in {payment.status!r} "
+                "status. Payment must be PRE_AUTH."
+            )
         processor = self.get_processor(payment)
         amount = await processor.release_lock(**context["kwargs"])
         apply_payment_update(
@@ -164,6 +181,15 @@ class PaymentFlow:
             payment=payment,
             kwargs={"amount": amount, **kwargs},
         )
+        if payment.status not in {
+            PaymentStatus.PAID,
+            PaymentStatus.PARTIAL,
+            PaymentStatus.REFUND_STARTED,
+        }:
+            raise InvalidTransitionError(
+                f"Cannot start refund for payment in {payment.status!r} "
+                "status. Payment must be PAID, PARTIAL, or REFUND_STARTED."
+            )
         processor = self.get_processor(payment)
         result = await processor.start_refund(**context["kwargs"])
         apply_payment_update(
