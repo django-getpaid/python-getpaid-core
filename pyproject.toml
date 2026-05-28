@@ -33,6 +33,7 @@ dev = [
     "myst-parser>=4.0.1",
     "pre-commit-hooks>=6.0.0",
     "ty>=0.0.16",
+    "pip-audit>=2.7.0",
 ]
 
 [project.urls]
