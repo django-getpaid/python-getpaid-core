@@ -4,7 +4,6 @@ from copy import deepcopy
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
-from typing import cast
 
 from getpaid_core.enums import FraudEvent
 from getpaid_core.enums import FraudStatus
@@ -65,8 +64,12 @@ def _merge_provider_data(payment: Payment, provider_data: dict) -> None:
 
 
 def _set_paid_amount(payment: Payment, paid_amount: Decimal) -> None:
-    """Set paid amount. Raises if paid_amount is None — callers must
-    provide an explicit amount."""
+    """Set paid amount. Raises if paid_amount exceeds amount_required."""
+    if paid_amount > payment.amount_required:
+        raise InvalidTransitionError(
+            f"Paid amount {paid_amount} exceeds amount_required "
+            f"{payment.amount_required}."
+        )
     previous_paid = payment.amount_paid
     next_paid = max(previous_paid, paid_amount)
     increment = next_paid - previous_paid
@@ -82,6 +85,11 @@ def _set_refunded_amount(
 ) -> None:
     if refunded_amount is None:
         refunded_amount = payment.amount_paid
+    if refunded_amount > payment.amount_paid:
+        raise InvalidTransitionError(
+            f"Refunded amount {refunded_amount} exceeds amount_paid "
+            f"{payment.amount_paid}."
+        )
     payment.amount_refunded = max(payment.amount_refunded, refunded_amount)
 
 
@@ -125,10 +133,10 @@ def _restore_payment_state(payment: Payment, snapshot: PaymentSnapshot) -> None:
     payment.external_id = snapshot.external_id
     payment.fraud_status = snapshot.fraud_status
     payment.fraud_message = snapshot.fraud_message
-    payment.provider_data = cast(
-        "dict[str, Any]",
-        {} if snapshot.provider_data is None else snapshot.provider_data,
-    )
+    if snapshot.provider_data is None:
+        payment.provider_data = {}
+    else:
+        payment.provider_data = snapshot.provider_data
 
 
 def _apply_payment_event(payment: Payment, update: PaymentUpdate) -> None:
@@ -250,7 +258,7 @@ def _apply_payment_event(payment: Payment, update: PaymentUpdate) -> None:
         )
 
     if event is PaymentEvent.LOCK_RELEASED:
-        if status in {PaymentStatus.PRE_AUTH, PaymentStatus.REFUNDED}:
+        if status is PaymentStatus.PRE_AUTH:
             payment.amount_locked = Decimal("0.00")
             payment.status = PaymentStatus.REFUNDED
             return

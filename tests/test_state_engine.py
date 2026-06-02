@@ -173,3 +173,198 @@ class TestApplyPaymentUpdate:
 
         assert payment.fraud_status == FraudStatus.CHECK
         assert payment.fraud_message == "Manual review required"
+
+
+class TestPaidAmountValidation:
+    """amount_paid must never exceed amount_required."""
+
+    def test_paid_amount_exceeding_required_raises(self) -> None:
+        """PAYMENT_CAPTURED with paid_amount > amount_required must raise."""
+        payment = MockPayment(
+            status=PaymentStatus.PREPARED,
+            amount_required=Decimal("100.00"),
+        )
+
+        with pytest.raises(
+            InvalidTransitionError,
+            match="exceeds amount_required",
+        ):
+            apply_payment_update(
+                payment,
+                PaymentUpdate(
+                    payment_event=PaymentEvent.PAYMENT_CAPTURED,
+                    paid_amount=Decimal("150.00"),
+                ),
+            )
+
+        assert payment.status == PaymentStatus.PREPARED
+        assert payment.amount_paid == Decimal("0")
+
+    def test_paid_amount_equal_to_required_succeeds(self) -> None:
+        """PAYMENT_CAPTURED with paid_amount == amount_required is valid."""
+        payment = MockPayment(
+            status=PaymentStatus.PREPARED,
+            amount_required=Decimal("100.00"),
+        )
+
+        apply_payment_update(
+            payment,
+            PaymentUpdate(
+                payment_event=PaymentEvent.PAYMENT_CAPTURED,
+                paid_amount=Decimal("100.00"),
+            ),
+        )
+
+        assert payment.status == PaymentStatus.PAID
+        assert payment.amount_paid == Decimal("100.00")
+
+    def test_paid_amount_accumulates_up_to_required(self) -> None:
+        """Cumulative captures sum up to amount_required."""
+        payment = MockPayment(
+            status=PaymentStatus.PREPARED,
+            amount_required=Decimal("100.00"),
+        )
+
+        # First capture: cumulative paid = 60
+        apply_payment_update(
+            payment,
+            PaymentUpdate(
+                payment_event=PaymentEvent.PAYMENT_CAPTURED,
+                paid_amount=Decimal("60.00"),
+            ),
+        )
+        assert payment.amount_paid == Decimal("60.00")
+        assert payment.status == PaymentStatus.PARTIAL
+
+        # Second capture: cumulative paid = 100 (60 + 40)
+        apply_payment_update(
+            payment,
+            PaymentUpdate(
+                payment_event=PaymentEvent.PAYMENT_CAPTURED,
+                paid_amount=Decimal("100.00"),
+            ),
+        )
+        assert payment.amount_paid == Decimal("100.00")
+        assert payment.status == PaymentStatus.PAID
+
+
+class TestRefundedAmountValidation:
+    """amount_refunded must never exceed amount_paid."""
+
+    def test_refunded_amount_exceeding_paid_raises(self) -> None:
+        """REFUND_CONFIRMED with refunded_amount > amount_paid must raise."""
+        payment = MockPayment(
+            status=PaymentStatus.PAID,
+            amount_paid=Decimal("100.00"),
+        )
+
+        with pytest.raises(
+            InvalidTransitionError,
+            match="exceeds amount_paid",
+        ):
+            apply_payment_update(
+                payment,
+                PaymentUpdate(
+                    payment_event=PaymentEvent.REFUND_REQUESTED,
+                ),
+            )
+            apply_payment_update(
+                payment,
+                PaymentUpdate(
+                    payment_event=PaymentEvent.REFUND_CONFIRMED,
+                    refunded_amount=Decimal("150.00"),
+                ),
+            )
+
+        assert payment.status == PaymentStatus.REFUND_STARTED
+        assert payment.amount_refunded == Decimal("0")
+
+    def test_refunded_amount_equal_to_paid_succeeds(self) -> None:
+        """REFUND_CONFIRMED with refunded_amount == amount_paid is valid."""
+        payment = MockPayment(
+            status=PaymentStatus.PAID,
+            amount_paid=Decimal("100.00"),
+        )
+
+        apply_payment_update(
+            payment,
+            PaymentUpdate(payment_event=PaymentEvent.REFUND_REQUESTED),
+        )
+        apply_payment_update(
+            payment,
+            PaymentUpdate(
+                payment_event=PaymentEvent.REFUND_CONFIRMED,
+                refunded_amount=Decimal("100.00"),
+            ),
+        )
+
+        assert payment.status == PaymentStatus.REFUNDED
+        assert payment.amount_refunded == Decimal("100.00")
+
+
+class TestLockReleased:
+    """LOCK_RELEASED event transitions: only PRE_AUTH is valid."""
+
+    def test_lock_released_from_pre_auth(self) -> None:
+        """LOCK_RELEASED on PRE_AUTH sets amount_locked=0 and status=REFUNDED."""
+        payment = MockPayment(
+            status=PaymentStatus.PRE_AUTH,
+            amount_locked=Decimal("100.00"),
+        )
+
+        apply_payment_update(
+            payment,
+            PaymentUpdate(payment_event=PaymentEvent.LOCK_RELEASED),
+        )
+
+        assert payment.status == PaymentStatus.REFUNDED
+        assert payment.amount_locked == Decimal("0.00")
+
+    def test_lock_released_from_refunded_raises(self) -> None:
+        """LOCK_RELEASED on REFUNDED must raise — a refunded payment
+        has no lock to release."""
+        payment = MockPayment(
+            status=PaymentStatus.REFUNDED,
+            amount_locked=Decimal("0.00"),
+        )
+
+        with pytest.raises(
+            InvalidTransitionError,
+            match="Cannot release lock",
+        ):
+            apply_payment_update(
+                payment,
+                PaymentUpdate(payment_event=PaymentEvent.LOCK_RELEASED),
+            )
+
+    def test_lock_released_from_paid_raises(self) -> None:
+        """LOCK_RELEASED on PAID must raise — a paid payment has no lock."""
+        payment = MockPayment(
+            status=PaymentStatus.PAID,
+            amount_locked=Decimal("0.00"),
+        )
+
+        with pytest.raises(
+            InvalidTransitionError,
+            match="Cannot release lock",
+        ):
+            apply_payment_update(
+                payment,
+                PaymentUpdate(payment_event=PaymentEvent.LOCK_RELEASED),
+            )
+
+    def test_lock_released_from_partial_raises(self) -> None:
+        """LOCK_RELEASED on PARTIAL must raise."""
+        payment = MockPayment(
+            status=PaymentStatus.PARTIAL,
+            amount_locked=Decimal("0.00"),
+        )
+
+        with pytest.raises(
+            InvalidTransitionError,
+            match="Cannot release lock",
+        ):
+            apply_payment_update(
+                payment,
+                PaymentUpdate(payment_event=PaymentEvent.LOCK_RELEASED),
+            )
