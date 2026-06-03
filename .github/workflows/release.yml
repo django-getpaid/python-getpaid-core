@@ -12,68 +12,56 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out the repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0  # Full history needed for version detection
 
       - name: Set up Python
-        uses: actions/setup-python@v3
+        uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.12"
 
-      - name: Upgrade pip
+      - name: Install uv
+        run: pip install uv
+
+      - name: Detect version from pyproject.toml
+        id: get-version
         run: |
-          pip install --constraint=.github/workflows/constraints.txt pip
-          pip --version
+          version=$(grep -E '^version\s*=' pyproject.toml | head -1 | sed -E "s/.*=\s*['\"]([^'\"]+)['\"].*/\1/")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      - name: Install Poetry
+      - name: Check if tag already exists
+        id: check-tag
         run: |
-          pip install --constraint=.github/workflows/constraints.txt poetry
-          poetry --version
+          tag="v${{ steps.get-version.outputs.version }}"
+          if git rev-parse "$tag" >/dev/null 2>&1; then
+            echo "already_tagged=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "already_tagged=false" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Check if there is a parent commit
-        id: check-parent-commit
+      - name: Tag new version
+        if: steps.check-tag.outputs.already_tagged == 'false'
         run: |
-          echo "::set-output name=sha::$(git rev-parse --verify --quiet HEAD^)"
-
-      - name: Detect and tag new version
-        id: check-version
-        if: steps.check-parent-commit.outputs.sha
-        uses: salsify/action-detect-and-tag-new-version@v2.0.1
-        with:
-          version-command: |
-            bash -o pipefail -c "poetry version | awk '{ print \$2 }'"
-
-      - name: Bump version for developmental release
-        if: "! steps.check-version.outputs.tag"
-        run: |
-          poetry version patch &&
-          version=$(poetry version | awk '{ print $2 }') &&
-          poetry version $version.dev.$(date +%s)
+          tag="v${{ steps.get-version.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$tag" -m "Release $tag"
+          git push origin "$tag"
 
       - name: Build package
-        run: |
-          poetry build --ansi
+        run: uv build
 
       - name: Publish package on PyPI
-        if: steps.check-version.outputs.tag
-        uses: pypa/gh-action-pypi-publish@v1.5.0
+        uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          user: __token__
           password: ${{ secrets.PYPI_TOKEN }}
-
-      - name: Publish package on TestPyPI
-        if: "! steps.check-version.outputs.tag"
-        uses: pypa/gh-action-pypi-publish@v1.5.0
-        with:
-          user: __token__
-          password: ${{ secrets.TEST_PYPI_TOKEN }}
-          repository_url: https://test.pypi.org/legacy/
 
       - name: Publish the release notes
         uses: release-drafter/release-drafter@v5.20.0
         with:
-          publish: ${{ steps.check-version.outputs.tag != '' }}
-          tag: ${{ steps.check-version.outputs.tag }}
+          publish: true
+          name: v${{ steps.get-version.outputs.version }}
+          tag: v${{ steps.get-version.outputs.version }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
