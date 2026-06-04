@@ -1,5 +1,6 @@
 """Payment flow orchestrator."""
 
+from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
 
@@ -19,6 +20,9 @@ from getpaid_core.types import TransactionResult
 from getpaid_core.validators import run_validators
 
 
+OperationValidator = Callable[[dict[str, Any]], dict[str, Any]]
+
+
 class PaymentFlow:
     """Core payment processing orchestrator."""
 
@@ -26,16 +30,19 @@ class PaymentFlow:
         self,
         repository: PaymentRepository,
         config: dict[str, dict[str, Any]] | None = None,
-        validators: list | None = None,
+        validators: list[OperationValidator] | None = None,
         registry: PluginRegistry | None = None,
     ) -> None:
         self.repository = repository
-        self.config = config or {}
-        self.validators = validators or []
+        self.config: dict[str, dict[str, Any]] = config or {}
+        self.validators: list[OperationValidator] = validators or []
         self.registry = registry or default_registry
 
     async def create_payment(
-        self, order: Order, backend_slug: str, **kwargs
+        self,
+        order: Order,
+        backend_slug: str,
+        **kwargs: Any,
     ) -> Payment:
         """Create a new payment for an order."""
         self.registry.get_by_slug(backend_slug)
@@ -50,7 +57,11 @@ class PaymentFlow:
         )
         return payment
 
-    async def prepare(self, payment: Payment, **kwargs) -> TransactionResult:
+    async def prepare(
+        self,
+        payment: Payment,
+        **kwargs: Any,
+    ) -> TransactionResult:
         """Prepare a payment for processing."""
         context = self._run_operation_validators(
             operation="prepare",
@@ -73,9 +84,9 @@ class PaymentFlow:
     async def handle_callback(
         self,
         payment: Payment,
-        data: dict,
-        headers: dict,
-        **kwargs,
+        data: dict[str, Any],
+        headers: dict[str, str],
+        **kwargs: Any,
     ) -> None:
         """Handle an incoming PUSH callback from the gateway."""
         context = self._run_operation_validators(
@@ -95,7 +106,10 @@ class PaymentFlow:
         apply_payment_update(payment, update)
         await self.repository.save(payment)
 
-    async def fetch_and_update_status(self, payment: Payment) -> Payment:
+    async def fetch_and_update_status(
+        self,
+        payment: Payment,
+    ) -> Payment:
         """PULL flow: fetch status from gateway and update."""
         context = self._run_operation_validators(
             operation="fetch_status",
@@ -104,6 +118,8 @@ class PaymentFlow:
         )
         processor = self.get_processor(payment)
         update = await processor.fetch_payment_status(**context["kwargs"])
+        if update is None:
+            return payment
         apply_payment_update(payment, update)
         await self.repository.save(payment)
         return payment
@@ -112,7 +128,7 @@ class PaymentFlow:
         self,
         payment: Payment,
         amount: Decimal | None = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> ChargeResult:
         """Charge a pre-authorized payment."""
         context = self._run_operation_validators(
@@ -148,7 +164,11 @@ class PaymentFlow:
             await self.repository.save(payment)
         return result
 
-    async def release_lock(self, payment: Payment, **kwargs) -> Decimal:
+    async def release_lock(
+        self,
+        payment: Payment,
+        **kwargs: Any,
+    ) -> Decimal:
         """Release a pre-authorized lock."""
         context = self._run_operation_validators(
             operation="release_lock",
@@ -173,7 +193,7 @@ class PaymentFlow:
         self,
         payment: Payment,
         amount: Decimal | None = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> RefundResult:
         """Start a refund."""
         context = self._run_operation_validators(
@@ -202,7 +222,11 @@ class PaymentFlow:
         await self.repository.save(payment)
         return result
 
-    async def cancel_refund(self, payment: Payment, **kwargs) -> bool:
+    async def cancel_refund(
+        self,
+        payment: Payment,
+        **kwargs: Any,
+    ) -> bool:
         """Cancel an in-progress refund."""
         context = self._run_operation_validators(
             operation="cancel_refund",
@@ -219,11 +243,17 @@ class PaymentFlow:
             await self.repository.save(payment)
         return success
 
-    def get_processor(self, payment: Payment):
+    def get_processor(
+        self,
+        payment: Payment,
+    ) -> Any:
         """Instantiate the processor for a payment."""
         processor_class = self.registry.get_by_slug(payment.backend)
         backend_config = self.config.get(payment.backend, {})
         return processor_class(payment, config=backend_config)
 
-    def _run_operation_validators(self, **context):
+    def _run_operation_validators(
+        self,
+        **context: Any,
+    ) -> dict[str, Any]:
         return run_validators(context, validators=self.validators)

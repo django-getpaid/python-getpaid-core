@@ -1,6 +1,8 @@
 """Tests for getpaid_core.registry.PluginRegistry."""
 
+import threading
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import ClassVar
 from unittest.mock import patch
@@ -112,3 +114,60 @@ class TestEntryPointDiscovery:
             registry.discover()
 
         assert registry.get_by_slug("pln-pay") is PLNProcessor
+
+
+class TestThreadSafety:
+    def test_ensure_discovered_concurrent_calls(self) -> None:
+        """Multiple threads calling _ensure_discovered concurrently must
+        only invoke discover() once."""
+        registry = PluginRegistry()
+        registry._discovered = False
+        call_count = 0
+        call_lock = threading.Lock()
+        barrier = threading.Barrier(4)
+
+        original_discover = registry.discover
+
+        def counting_discover() -> None:
+            nonlocal call_count
+            with call_lock:
+                call_count += 1
+            original_discover()
+
+        with patch(
+            "getpaid_core.registry.entry_points",
+            return_value=[SimpleNamespace(load=lambda: PLNProcessor)],
+        ):
+            with patch.object(registry, "discover", side_effect=counting_discover):
+                with ThreadPoolExecutor(max_workers=4) as pool:
+                    def worker() -> None:
+                        barrier.wait()  # synchronise all threads
+                        registry._ensure_discovered()
+
+                    futures = [
+                        pool.submit(worker) for _ in range(4)
+                    ]
+                    for f in futures:
+                        f.result()
+
+        # discover() should have been called exactly once
+        assert call_count == 1
+
+    def test_concurrent_get_by_slug(self) -> None:
+        """Multiple threads calling get_by_slug concurrently must not
+        raise errors or return inconsistent results."""
+        registry = PluginRegistry()
+        registry._discovered = False
+
+        with patch(
+            "getpaid_core.registry.entry_points",
+            return_value=[SimpleNamespace(load=lambda: PLNProcessor)],
+        ):
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                futures = [
+                    pool.submit(registry.get_by_slug, "pln-pay")
+                    for _ in range(32)
+                ]
+                for f in futures:
+                    result = f.result()
+                    assert result is PLNProcessor

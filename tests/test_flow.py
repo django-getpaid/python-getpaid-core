@@ -121,6 +121,25 @@ class TestFetchAndUpdateStatus:
         assert result.amount_paid == Decimal("100.00")
 
     @pytest.mark.asyncio
+    async def test_no_save_when_fetch_returns_none(self, flow, mock_repo):
+        """When fetch_payment_status returns None (non-terminal state),
+        the payment must not be saved."""
+        payment = MockPayment(backend="mock", status=PaymentStatus.PREPARED)
+        mock_repo._payments[payment.id] = payment
+
+        with patch.object(
+            MockProcessor,
+            "fetch_payment_status",
+            new_callable=AsyncMock,
+            return_value=None,
+        ):
+            result = await flow.fetch_and_update_status(payment)
+
+        assert result is payment
+        assert result.status == PaymentStatus.PREPARED
+        assert mock_repo.save_calls == 0
+
+    @pytest.mark.asyncio
     async def test_duplicate_provider_event_is_idempotent(self, flow):
         payment = MockPayment(backend="mock", status=PaymentStatus.PREPARED)
 

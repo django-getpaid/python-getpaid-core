@@ -1,5 +1,6 @@
 """Plugin registry for payment backends."""
 
+import threading
 from importlib.metadata import entry_points
 
 from getpaid_core.processor import BaseProcessor
@@ -14,6 +15,7 @@ class PluginRegistry:
     def __init__(self) -> None:
         self._backends: dict[str, type[BaseProcessor]] = {}
         self._discovered = False
+        self._lock = threading.Lock()
 
     def discover(self) -> None:
         """Load all backends registered via entry points."""
@@ -64,7 +66,9 @@ class PluginRegistry:
 
     def _ensure_discovered(self) -> None:
         if not self._discovered:
-            self.discover()
+            with self._lock:
+                if not self._discovered:
+                    self.discover()
 
     def _register_backend(self, processor_class: type[BaseProcessor]) -> None:
         slug = processor_class.slug
