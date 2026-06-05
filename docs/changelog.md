@@ -1,5 +1,16 @@
 # Changelog
 
+## v3.0.1 (2026-06-05)
+
+### Notes
+
+- Version bump to coordinate with `django-getpaid` v3.0.1, which replaced
+  enum inheritance with composition to support Python 3.14's stricter
+  `EnumType._check_for_existing_members_` check. No changes to core enums
+  themselves — the breaking change was in the Django adapter's wrapper classes.
+
+---
+
 ## v3.0.0 (2026-06-04)
 
 Major stable release — framework-agnostic payment processing core.
