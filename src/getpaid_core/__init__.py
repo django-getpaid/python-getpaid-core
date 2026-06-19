@@ -2,6 +2,7 @@
 
 __version__ = "3.0.1"
 
+from getpaid_core.enums import AutoName
 from getpaid_core.enums import BackendMethod
 from getpaid_core.enums import ConfirmationMethod
 from getpaid_core.enums import FraudEvent
@@ -27,6 +28,7 @@ from getpaid_core.types import TransactionResult
 
 
 __all__ = [
+    "AutoName",
     "BackendMethod",
     "BaseProcessor",
     "ChargeFailure",

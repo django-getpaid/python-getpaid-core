@@ -28,10 +28,6 @@ class ItemInfo(TypedDict):
     unit_price: Decimal
 
 
-def _copy_mapping(value: dict[str, Any] | None) -> dict[str, Any]:
-    return dict(value or {})
-
-
 @dataclass(slots=True)
 class TransactionResult:
     """Result of preparing a transaction."""
@@ -49,7 +45,7 @@ class TransactionResult:
         self.form_data = (
             None if self.form_data is None else dict(self.form_data)
         )
-        self.provider_data = _copy_mapping(self.provider_data)
+        self.provider_data = dict(self.provider_data or {})
 
 
 @dataclass(slots=True)
@@ -62,7 +58,7 @@ class ChargeResult:
     provider_data: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        self.provider_data = _copy_mapping(self.provider_data)
+        self.provider_data = dict(self.provider_data or {})
 
 
 @dataclass(slots=True)
@@ -73,7 +69,7 @@ class RefundResult:
     provider_data: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        self.provider_data = _copy_mapping(self.provider_data)
+        self.provider_data = dict(self.provider_data or {})
 
 
 @dataclass(slots=True)
@@ -95,8 +91,4 @@ class PaymentUpdate:
             self.payment_event = PaymentEvent(self.payment_event)
         if self.fraud_event is not None:
             self.fraud_event = FraudEvent(self.fraud_event)
-        self.provider_data = _copy_mapping(self.provider_data)
-
-
-ChargeResponse = ChargeResult
-PaymentStatusResponse = PaymentUpdate
+        self.provider_data = dict(self.provider_data or {})

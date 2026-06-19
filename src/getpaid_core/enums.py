@@ -3,6 +3,14 @@
 from enum import StrEnum
 
 
+class AutoName(StrEnum):
+    """StrEnum base that uses the member name as its value."""
+
+    @staticmethod
+    def _generate_next_value_(name, start, count, last_values):
+        return name.strip("_")
+
+
 class PaymentStatus(StrEnum):
     """Internal payment status."""
 
