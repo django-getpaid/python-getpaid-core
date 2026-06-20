@@ -1,6 +1,6 @@
 """Getpaid Core -- framework-agnostic payment processing."""
 
-__version__ = "3.0.1"
+__version__ = "3.1.0"
 
 from getpaid_core.enums import AutoName
 from getpaid_core.enums import BackendMethod
