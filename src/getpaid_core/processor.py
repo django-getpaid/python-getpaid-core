@@ -46,7 +46,20 @@ class BaseProcessor(ABC):
     async def verify_callback(
         self, data: dict, headers: dict, **kwargs
     ) -> None:
-        """Verify callback authenticity. Default: no-op."""
+        """Verify callback authenticity.
+
+        Fail-closed default: raises ``NotImplementedError``. Every
+        processor must implement provider callback authentication (e.g.
+        signature or HMAC verification) and raise
+        :class:`~getpaid_core.exceptions.InvalidCallbackError` on failure.
+        If the provider genuinely offers no verification mechanism,
+        override this method explicitly with a documented no-op.
+        """
+        raise NotImplementedError(
+            "processor must implement verify_callback to authenticate "
+            "provider callbacks; override explicitly if the provider has "
+            "no verification"
+        )
 
     async def handle_callback(
         self, data: dict, headers: dict, **kwargs

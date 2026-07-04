@@ -19,6 +19,7 @@ import pytest
 from getpaid_core.enums import FraudEvent
 from getpaid_core.enums import PaymentEvent
 from getpaid_core.enums import PaymentStatus
+from getpaid_core.exceptions import InvalidTransitionError
 from getpaid_core.fsm import apply_payment_update
 from getpaid_core.registry import PluginRegistry
 from getpaid_core.types import PaymentUpdate
@@ -49,9 +50,18 @@ class TestFSMBenchmarks:
         )
 
     def test_bench_fsm_prepare(self, fresh_payment, benchmark):
-        """Bench: NEW → PREPARED transition."""
+        """Bench: NEW → PREPARED transition.
+
+        PREPARED is only valid from NEW (re-preparing raises), so the
+        status is reset before each round.
+        """
         update = PaymentUpdate(payment_event=PaymentEvent.PREPARED)
-        benchmark(lambda: apply_payment_update(fresh_payment, update))
+
+        def _transition():
+            fresh_payment.status = PaymentStatus.NEW
+            return apply_payment_update(fresh_payment, update)
+
+        benchmark(_transition)
 
     def test_bench_fsm_lock(self, fresh_payment, benchmark):
         """Bench: NEW → PRE_AUTH (LOCKED event)."""
@@ -147,6 +157,7 @@ class TestFSMBenchmarks:
 
     def test_bench_fsm_lock_released(self, benchmark):
         """Bench: PRE_AUTH → REFUNDED (lock released)."""
+
         def _transition():
             payment = MockPayment(
                 status=PaymentStatus.PRE_AUTH,
@@ -215,8 +226,8 @@ class TestFSMBenchmarks:
         apply_payment_update(payment, update)
         benchmark(lambda: apply_payment_update(payment, update))
 
-    def test_bench_fsm_invalid_transition_silent(self, benchmark):
-        """Bench: FSM silently ignores invalid transitions (idempotent design)."""
+    def test_bench_fsm_invalid_transition_raises(self, benchmark):
+        """Bench: FSM rejects invalid transitions (raise + rollback path)."""
         payment = MockPayment(
             status=PaymentStatus.PAID,
             amount_required=Decimal("100.00"),
@@ -230,7 +241,15 @@ class TestFSMBenchmarks:
             payment_event=PaymentEvent.LOCKED,
             locked_amount=Decimal("50.00"),
         )
-        benchmark(lambda: apply_payment_update(payment, update))
+
+        def _attempt():
+            try:
+                apply_payment_update(payment, update)
+            except InvalidTransitionError:
+                return None
+            raise AssertionError("expected InvalidTransitionError")
+
+        benchmark(_attempt)
 
         # Verify no state change
         assert payment.status is PaymentStatus.PAID
@@ -288,7 +307,9 @@ class TestRegistryBenchmarks:
         """Bench: O(1) dict lookup by slug."""
         benchmark(lambda: populated_registry.get_by_slug("backend-5"))
 
-    def test_bench_registry_get_for_currency(self, populated_registry, benchmark):
+    def test_bench_registry_get_for_currency(
+        self, populated_registry, benchmark
+    ):
         """Bench: filter backends by currency."""
         benchmark(lambda: populated_registry.get_for_currency("PLN"))
 
@@ -296,7 +317,9 @@ class TestRegistryBenchmarks:
         """Bench: build (slug, name) choices list."""
         benchmark(lambda: populated_registry.get_choices("EUR"))
 
-    def test_bench_registry_get_all_currencies(self, populated_registry, benchmark):
+    def test_bench_registry_get_all_currencies(
+        self, populated_registry, benchmark
+    ):
         """Bench: collect all supported currencies."""
         benchmark(lambda: populated_registry.get_all_currencies())
 
@@ -353,7 +376,11 @@ class TestCallbackBenchmarks:
         benchmark(_run)
 
     def test_bench_flow_prepare(self, flow_with_registry, benchmark):
-        """Bench: prepare flow (validators + processor + FSM + save)."""
+        """Bench: prepare flow (validators + processor + FSM + save).
+
+        Re-preparing a PREPARED payment raises, so the status is reset
+        before each round.
+        """
         import asyncio
 
         from .conftest import MockOrder
@@ -367,11 +394,14 @@ class TestCallbackBenchmarks:
         )
 
         def _run():
+            payment.status = PaymentStatus.NEW
             return asyncio.run(flow_with_registry.prepare(payment))
 
         benchmark(_run)
 
-    def test_bench_flow_handle_callback_confirmed(self, flow_with_registry, benchmark):
+    def test_bench_flow_handle_callback_confirmed(
+        self, flow_with_registry, benchmark
+    ):
         """Bench: callback handling for payment confirmed."""
         import asyncio
 
@@ -390,14 +420,20 @@ class TestCallbackBenchmarks:
             return asyncio.run(
                 flow_with_registry.handle_callback(
                     payment,
-                    data={"event": "payment_confirmed", "paid_amount": "100.00", "event_id": "cb-1"},
+                    data={
+                        "event": "payment_confirmed",
+                        "paid_amount": "100.00",
+                        "event_id": "cb-1",
+                    },
                     headers={"Content-Type": "application/json"},
                 )
             )
 
         benchmark(_run)
 
-    def test_bench_flow_handle_callback_fraud(self, flow_with_registry, benchmark):
+    def test_bench_flow_handle_callback_fraud(
+        self, flow_with_registry, benchmark
+    ):
         """Bench: callback handling for fraud review."""
         import asyncio
 
@@ -490,7 +526,11 @@ class TestCallbackBenchmarks:
         asyncio.run(
             flow_with_registry.handle_callback(
                 payment,
-                data={"event": "payment_confirmed", "paid_amount": "100.00", "event_id": "cb-1"},
+                data={
+                    "event": "payment_confirmed",
+                    "paid_amount": "100.00",
+                    "event_id": "cb-1",
+                },
                 headers={"Content-Type": "application/json"},
             )
         )
@@ -516,7 +556,9 @@ class TestCallbackBenchmarks:
         asyncio.run(flow_with_registry.prepare(payment))
 
         def _run():
-            return asyncio.run(flow_with_registry.fetch_and_update_status(payment))
+            return asyncio.run(
+                flow_with_registry.fetch_and_update_status(payment)
+            )
 
         benchmark(_run)
 
@@ -537,7 +579,11 @@ class TestCallbackBenchmarks:
         asyncio.run(
             flow_with_registry.handle_callback(
                 payment,
-                data={"event": "payment_confirmed", "paid_amount": "100.00", "event_id": "cb-1"},
+                data={
+                    "event": "payment_confirmed",
+                    "paid_amount": "100.00",
+                    "event_id": "cb-1",
+                },
                 headers={"Content-Type": "application/json"},
             )
         )

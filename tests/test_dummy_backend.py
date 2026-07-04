@@ -54,6 +54,17 @@ class TestDummyPrepareTransaction:
         }
 
 
+class TestDummyVerifyCallback:
+    @pytest.mark.asyncio
+    async def test_verify_callback_is_explicit_dev_only_noop(self) -> None:
+        """DummyProcessor explicitly opts out of callback verification
+        (dev-only backend) instead of inheriting the fail-closed default."""
+        payment = MockPayment(backend="dummy")
+        processor = DummyProcessor(cast("PaymentProtocol", payment))
+
+        assert await processor.verify_callback({}, {}) is None
+
+
 class TestDummyHandleCallback:
     @pytest.mark.asyncio
     async def test_payment_confirmed_maps_to_semantic_update(self) -> None:

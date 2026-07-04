@@ -1,5 +1,6 @@
 """State engine for payment and fraud lifecycle transitions."""
 
+from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass
 from decimal import Decimal
@@ -44,16 +45,45 @@ def _coerce_fraud_status(payment: Payment) -> FraudStatus:
     return FraudStatus(fraud_status)
 
 
+# Transient (non-serialized) attribute caching a set view of
+# provider_data["applied_event_ids"] for O(1) dedupe lookups.
+_EVENT_ID_CACHE_ATTR = "_getpaid_applied_event_ids_cache"
+
+
+def _applied_event_ids(payment: Payment) -> tuple[list, set]:
+    """Return the applied-event-id list and an O(1) set view of it.
+
+    The stored representation in ``provider_data`` stays a plain list
+    (unchanged serialization); the set is a cache attached to the payment
+    object and rebuilt whenever the list is replaced (e.g. rollback,
+    reload from storage) or mutated externally.
+    """
+    provider_data = _ensure_provider_data(payment)
+    applied = provider_data.setdefault("applied_event_ids", [])
+    cache = getattr(payment, _EVENT_ID_CACHE_ATTR, None)
+    if (
+        cache is None
+        or cache[0] is not applied
+        or len(cache[1]) != len(applied)
+    ):
+        cache = (applied, set(applied))
+        # Payment objects with __slots__ cannot hold the cache; fall
+        # back to per-call set construction there.
+        with suppress(AttributeError):
+            setattr(payment, _EVENT_ID_CACHE_ATTR, cache)
+    return applied, cache[1]
+
+
 def _record_provider_event(
     payment: Payment, provider_event_id: str | None
 ) -> bool:
     if not provider_event_id:
         return True
-    provider_data = _ensure_provider_data(payment)
-    applied = provider_data.setdefault("applied_event_ids", [])
-    if provider_event_id in applied:
+    applied, applied_set = _applied_event_ids(payment)
+    if provider_event_id in applied_set:
         return False
     applied.append(provider_event_id)
+    applied_set.add(provider_event_id)
     return True
 
 
@@ -150,7 +180,9 @@ def _apply_payment_event(payment: Payment, update: PaymentUpdate) -> None:
         if status is PaymentStatus.NEW:
             payment.status = PaymentStatus.PREPARED
             return
-        return
+        raise InvalidTransitionError(
+            f"Cannot prepare payment in {status.value!r} status."
+        )
 
     if event is PaymentEvent.LOCKED:
         if status in {
@@ -165,7 +197,9 @@ def _apply_payment_event(payment: Payment, update: PaymentUpdate) -> None:
             _set_locked_amount(payment, update.locked_amount)
             payment.status = PaymentStatus.PRE_AUTH
             return
-        return
+        raise InvalidTransitionError(
+            f"Cannot lock payment in {status.value!r} status."
+        )
 
     if event is PaymentEvent.CHARGE_REQUESTED:
         if status in {PaymentStatus.PRE_AUTH, PaymentStatus.IN_CHARGE}:
@@ -260,7 +294,12 @@ def _apply_payment_event(payment: Payment, update: PaymentUpdate) -> None:
     if event is PaymentEvent.LOCK_RELEASED:
         if status is PaymentStatus.PRE_AUTH:
             payment.amount_locked = Decimal("0.00")
-            payment.status = PaymentStatus.REFUNDED
+            # Nothing was captured: the payment was cancelled, not
+            # refunded. Keep REFUNDED only when money actually moved.
+            if payment.amount_paid > 0:
+                payment.status = PaymentStatus.REFUNDED
+            else:
+                payment.status = PaymentStatus.CANCELLED
             return
         raise InvalidTransitionError(
             f"Cannot release lock for payment in {status.value!r} status."

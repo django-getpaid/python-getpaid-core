@@ -59,6 +59,29 @@ class MyGatewayProcessor(BaseProcessor):
         )
 ```
 
+### Callback verification is mandatory
+
+If your processor handles PUSH callbacks, it **must** implement
+`verify_callback` to authenticate them (signature/HMAC checks, shared
+secrets, etc.) and raise `InvalidCallbackError` when verification fails.
+The default implementation fails closed by raising `NotImplementedError`
+so an unverified callback can never be processed by accident:
+
+```python
+from getpaid_core.exceptions import InvalidCallbackError
+
+
+class MyGatewayProcessor(BaseProcessor):
+    ...
+
+    async def verify_callback(self, data: dict, headers: dict, **kwargs) -> None:
+        if not self._signature_is_valid(data, headers):
+            raise InvalidCallbackError("Invalid callback signature")
+```
+
+If the provider genuinely offers no verification mechanism, override the
+method explicitly with a documented no-op.
+
 ## Registering a Plugin
 
 Plugins are discovered via Python entry points. Add this to your plugin's

@@ -1,10 +1,14 @@
 """Plugin registry for payment backends."""
 
+import logging
 import threading
 from importlib.metadata import entry_points
 
+from getpaid_core.exceptions import BackendNotFoundError
 from getpaid_core.processor import BaseProcessor
 
+
+logger = logging.getLogger(__name__)
 
 ENTRY_POINT_GROUP = "getpaid.backends"
 
@@ -15,25 +19,54 @@ class PluginRegistry:
     def __init__(self) -> None:
         self._backends: dict[str, type[BaseProcessor]] = {}
         self._discovered = False
-        self._lock = threading.Lock()
+        # Re-entrant: discover() is also called while _ensure_discovered()
+        # already holds the lock.
+        self._lock = threading.RLock()
 
     def discover(self) -> None:
-        """Load all backends registered via entry points."""
-        for entry_point in entry_points(group=ENTRY_POINT_GROUP):
-            processor_class = entry_point.load()
-            if isinstance(processor_class, type) and issubclass(
-                processor_class, BaseProcessor
-            ):
-                self._register_backend(processor_class)
-        self._discovered = True
+        """Load all backends registered via entry points.
+
+        A plugin that fails to import, or that does not provide a
+        ``BaseProcessor`` subclass, is skipped with a logged warning and
+        does not abort discovery of the remaining plugins.
+        """
+        with self._lock:
+            for entry_point in entry_points(group=ENTRY_POINT_GROUP):
+                name = getattr(entry_point, "name", repr(entry_point))
+                try:
+                    processor_class = entry_point.load()
+                except Exception:
+                    logger.warning(
+                        "Failed to load payment backend entry point %r "
+                        "from group %r; skipping it.",
+                        name,
+                        ENTRY_POINT_GROUP,
+                        exc_info=True,
+                    )
+                    continue
+                if isinstance(processor_class, type) and issubclass(
+                    processor_class, BaseProcessor
+                ):
+                    self._register_backend(processor_class)
+                else:
+                    logger.warning(
+                        "Entry point %r in group %r did not provide a "
+                        "BaseProcessor subclass (got %r); skipping it.",
+                        name,
+                        ENTRY_POINT_GROUP,
+                        processor_class,
+                    )
+            self._discovered = True
 
     def register(self, processor_class: type[BaseProcessor]) -> None:
         """Manual registration for testing or dynamic use."""
-        self._register_backend(processor_class)
+        with self._lock:
+            self._register_backend(processor_class)
 
     def unregister(self, slug: str) -> None:
         """Remove a backend by slug."""
-        self._backends.pop(slug, None)
+        with self._lock:
+            self._backends.pop(slug, None)
 
     def get_for_currency(self, currency: str) -> list[type[BaseProcessor]]:
         """Return all backends supporting the given currency."""
@@ -52,9 +85,20 @@ class PluginRegistry:
         ]
 
     def get_by_slug(self, slug: str) -> type[BaseProcessor]:
-        """Return a backend class by slug. Raises KeyError."""
+        """Return a backend class by slug.
+
+        Raises ``BackendNotFoundError`` (a ``KeyError`` subclass, so
+        legacy ``except KeyError`` callers keep working) when no backend
+        is registered under ``slug``.
+        """
         self._ensure_discovered()
-        return self._backends[slug]
+        try:
+            return self._backends[slug]
+        except KeyError:
+            raise BackendNotFoundError(
+                f"No payment backend registered for slug {slug!r}.",
+                context={"slug": slug},
+            ) from None
 
     def get_all_currencies(self) -> set[str]:
         """Return all currencies supported by all backends."""
@@ -72,6 +116,12 @@ class PluginRegistry:
 
     def _register_backend(self, processor_class: type[BaseProcessor]) -> None:
         slug = processor_class.slug
+        if not slug:
+            raise ValueError(
+                "Cannot register backend "
+                f"{processor_class.__module__}.{processor_class.__name__} "
+                "with an empty slug."
+            )
         existing = self._backends.get(slug)
         if existing is not None and existing is not processor_class:
             raise ValueError(

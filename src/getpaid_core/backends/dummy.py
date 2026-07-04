@@ -46,6 +46,15 @@ class DummyProcessor(BaseProcessor):
             redirect_url=f"https://dummy.example.com/pay/{self.payment.id}",
         )
 
+    async def verify_callback(
+        self, data: dict, headers: dict, **kwargs
+    ) -> None:
+        """Explicit no-op verification.
+
+        This backend is for development and testing only -- it performs
+        no real callback authentication. Never use it in production.
+        """
+
     async def handle_callback(
         self, data: dict, headers: dict, **kwargs
     ) -> PaymentUpdate | None:

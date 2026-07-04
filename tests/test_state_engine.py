@@ -160,6 +160,39 @@ class TestApplyPaymentUpdate:
         assert payment.fraud_status == FraudStatus.ACCEPTED
         assert payment.provider_data == {"existing": "value"}
 
+    def test_prepared_in_wrong_status_raises(self) -> None:
+        """PREPARED outside NEW must raise like every other event, not
+        silently return."""
+        payment = MockPayment(
+            status=PaymentStatus.PAID, amount_paid=Decimal("100.00")
+        )
+
+        with pytest.raises(InvalidTransitionError, match="Cannot prepare"):
+            apply_payment_update(
+                payment,
+                PaymentUpdate(payment_event=PaymentEvent.PREPARED),
+            )
+
+        assert payment.status == PaymentStatus.PAID
+
+    def test_locked_in_wrong_status_raises(self) -> None:
+        """LOCKED outside NEW/PREPARED/PRE_AUTH must raise, not silently
+        return."""
+        payment = MockPayment(
+            status=PaymentStatus.PAID, amount_paid=Decimal("100.00")
+        )
+
+        with pytest.raises(InvalidTransitionError, match="Cannot lock"):
+            apply_payment_update(
+                payment,
+                PaymentUpdate(
+                    payment_event=PaymentEvent.LOCKED,
+                    locked_amount=Decimal("50.00"),
+                ),
+            )
+
+        assert payment.status == PaymentStatus.PAID
+
     def test_fraud_event_updates_message(self) -> None:
         payment = MockPayment(fraud_status=FraudStatus.UNKNOWN)
 
@@ -173,6 +206,98 @@ class TestApplyPaymentUpdate:
 
         assert payment.fraud_status == FraudStatus.CHECK
         assert payment.fraud_message == "Manual review required"
+
+
+class TestProviderEventDedupe:
+    """Duplicate provider events are detected via an O(1) set view while
+    provider_data keeps the serialized list representation unchanged."""
+
+    def test_stored_representation_stays_a_list(self) -> None:
+        payment = MockPayment(status=PaymentStatus.PREPARED)
+
+        for i in range(3):
+            apply_payment_update(
+                payment,
+                PaymentUpdate(
+                    provider_event_id=f"evt-{i}",
+                    provider_data={"seen": i},
+                ),
+            )
+
+        applied = payment.provider_data["applied_event_ids"]
+        assert isinstance(applied, list)
+        assert applied == ["evt-0", "evt-1", "evt-2"]
+
+    def test_set_view_tracks_the_list(self) -> None:
+        payment = MockPayment(status=PaymentStatus.PREPARED)
+
+        apply_payment_update(payment, PaymentUpdate(provider_event_id="evt-a"))
+        apply_payment_update(payment, PaymentUpdate(provider_event_id="evt-b"))
+
+        cached_list, cached_set = payment._getpaid_applied_event_ids_cache
+        assert cached_list is payment.provider_data["applied_event_ids"]
+        assert cached_set == {"evt-a", "evt-b"}
+
+    def test_dedupe_survives_rollback(self) -> None:
+        """A rolled-back update must not leave its event id in the set
+        view: the same id must still be applicable afterwards, and then
+        deduped on a genuine replay."""
+        payment = MockPayment(status=PaymentStatus.PREPARED)
+
+        apply_payment_update(payment, PaymentUpdate(provider_event_id="evt-a"))
+
+        with pytest.raises(InvalidTransitionError):
+            apply_payment_update(
+                payment,
+                PaymentUpdate(
+                    payment_event=PaymentEvent.PAYMENT_CAPTURED,
+                    paid_amount=Decimal("999.00"),
+                    provider_event_id="evt-b",
+                ),
+            )
+        assert payment.provider_data["applied_event_ids"] == ["evt-a"]
+
+        # evt-b was rolled back, so it must apply cleanly now...
+        apply_payment_update(
+            payment,
+            PaymentUpdate(
+                payment_event=PaymentEvent.PAYMENT_CAPTURED,
+                paid_amount=Decimal("100.00"),
+                provider_event_id="evt-b",
+            ),
+        )
+        assert payment.amount_paid == Decimal("100.00")
+
+        # ...and be deduped on replay.
+        apply_payment_update(
+            payment,
+            PaymentUpdate(
+                payment_event=PaymentEvent.PAYMENT_CAPTURED,
+                paid_amount=Decimal("100.00"),
+                provider_event_id="evt-b",
+            ),
+        )
+        assert payment.provider_data["applied_event_ids"] == [
+            "evt-a",
+            "evt-b",
+        ]
+
+    def test_externally_replaced_list_is_respected(self) -> None:
+        """If the stored list is replaced (e.g. payment reloaded from the
+        database), the set view is rebuilt from it."""
+        payment = MockPayment(status=PaymentStatus.PREPARED)
+        apply_payment_update(payment, PaymentUpdate(provider_event_id="evt-a"))
+
+        payment.provider_data["applied_event_ids"] = ["evt-x"]
+
+        assert (
+            apply_payment_update(
+                payment, PaymentUpdate(provider_event_id="evt-x")
+            )
+            is payment
+        )
+        # evt-x was already applied in the replaced list -> deduped.
+        assert payment.provider_data["applied_event_ids"] == ["evt-x"]
 
 
 class TestPaidAmountValidation:
@@ -305,11 +430,30 @@ class TestRefundedAmountValidation:
 class TestLockReleased:
     """LOCK_RELEASED event transitions: only PRE_AUTH is valid."""
 
-    def test_lock_released_from_pre_auth(self) -> None:
-        """LOCK_RELEASED on PRE_AUTH sets amount_locked=0 and status=REFUNDED."""
+    def test_lock_released_with_zero_paid_cancels_payment(self) -> None:
+        """LOCK_RELEASED on PRE_AUTH with nothing paid sets
+        amount_locked=0 and status=CANCELLED -- no money moved, so the
+        payment was cancelled, not refunded."""
         payment = MockPayment(
             status=PaymentStatus.PRE_AUTH,
             amount_locked=Decimal("100.00"),
+        )
+
+        apply_payment_update(
+            payment,
+            PaymentUpdate(payment_event=PaymentEvent.LOCK_RELEASED),
+        )
+
+        assert payment.status == PaymentStatus.CANCELLED
+        assert payment.amount_locked == Decimal("0.00")
+
+    def test_lock_released_with_partial_paid_marks_refunded(self) -> None:
+        """LOCK_RELEASED when some amount was already captured keeps the
+        historical REFUNDED status."""
+        payment = MockPayment(
+            status=PaymentStatus.PRE_AUTH,
+            amount_paid=Decimal("30.00"),
+            amount_locked=Decimal("70.00"),
         )
 
         apply_payment_update(

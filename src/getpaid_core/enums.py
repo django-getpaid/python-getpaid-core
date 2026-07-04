@@ -23,6 +23,7 @@ class PaymentStatus(StrEnum):
     FAILED = "failed"
     REFUND_STARTED = "refund_started"
     REFUNDED = "refunded"
+    CANCELLED = "cancelled"
 
 
 class FraudStatus(StrEnum):

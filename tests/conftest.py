@@ -98,6 +98,11 @@ class MockProcessor(BaseProcessor):
             provider_data={"customer_ip": customer_ip},
         )
 
+    async def verify_callback(
+        self, data: dict, headers: dict, **kwargs
+    ) -> None:
+        """Explicit test-only no-op verification."""
+
     async def handle_callback(
         self,
         data: dict,

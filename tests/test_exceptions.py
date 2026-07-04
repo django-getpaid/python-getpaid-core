@@ -2,6 +2,7 @@
 
 import pytest
 
+from getpaid_core.exceptions import BackendNotFoundError
 from getpaid_core.exceptions import ChargeFailure
 from getpaid_core.exceptions import CommunicationError
 from getpaid_core.exceptions import CredentialsError
@@ -9,6 +10,7 @@ from getpaid_core.exceptions import GetPaidException
 from getpaid_core.exceptions import InvalidCallbackError
 from getpaid_core.exceptions import InvalidTransitionError
 from getpaid_core.exceptions import LockFailure
+from getpaid_core.exceptions import ReconciliationRequiredError
 from getpaid_core.exceptions import RefundFailure
 
 
@@ -55,6 +57,24 @@ class TestExceptionHierarchy:
 
     def test_invalid_transition_is_getpaid(self):
         assert issubclass(InvalidTransitionError, GetPaidException)
+
+    def test_backend_not_found_is_getpaid_and_keyerror(self):
+        assert issubclass(BackendNotFoundError, GetPaidException)
+        assert issubclass(BackendNotFoundError, KeyError)
+
+    def test_backend_not_found_str_is_plain_message(self):
+        exc = BackendNotFoundError("no backend for slug 'x'")
+        assert str(exc) == "no backend for slug 'x'"
+
+    def test_reconciliation_required_is_getpaid(self):
+        assert issubclass(ReconciliationRequiredError, GetPaidException)
+
+    def test_reconciliation_required_carries_charge_result(self):
+        marker = object()
+        exc = ReconciliationRequiredError(
+            "manual reconciliation required", charge_result=marker
+        )
+        assert exc.charge_result is marker
 
 
 class TestExceptionContext:

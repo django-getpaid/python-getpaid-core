@@ -43,7 +43,14 @@ class Payment(Protocol):
 
 @runtime_checkable
 class PaymentRepository(Protocol):
-    """Persistence abstraction. Framework adapters implement this."""
+    """Persistence abstraction. Framework adapters implement this.
+
+    Note: getpaid-core itself only calls ``create()`` (from
+    ``PaymentFlow.create_payment``) and ``save()`` (after applying
+    payment updates). ``get_by_id()``, ``update_status()`` and
+    ``list_by_order()`` are part of the contract for framework adapters
+    and sibling plugins but are not invoked by the core.
+    """
 
     async def get_by_id(self, payment_id: str) -> Payment: ...
     async def create(self, **kwargs) -> Payment: ...

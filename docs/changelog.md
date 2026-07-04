@@ -1,5 +1,59 @@
 # Changelog
 
+## v3.2.0 (2026-07-04)
+
+### Breaking Changes
+
+- **Fail-closed `verify_callback`**: the default
+  `BaseProcessor.verify_callback` no longer silently accepts callbacks —
+  it now raises `NotImplementedError`. Every processor must implement
+  callback authentication, or override the method explicitly (with a
+  documented no-op) if the provider offers no verification. The shipped
+  `DummyProcessor` overrides it explicitly as a dev-only no-op.
+- **FSM: `PREPARED`/`LOCKED` events in wrong statuses now raise**:
+  previously these two events were silently ignored when the payment was
+  not in a valid source status, while all other events raised
+  `InvalidTransitionError`. They now raise too.
+- **FSM: releasing a lock with nothing paid marks the payment
+  `CANCELLED`**: `LOCK_RELEASED` on a `PRE_AUTH` payment with
+  `amount_paid == 0` now sets the new `PaymentStatus.CANCELLED`
+  (`"cancelled"`) instead of `REFUNDED` — no money moved, so nothing was
+  refunded. If some amount was already captured, the status remains
+  `REFUNDED`.
+
+### Fixed
+
+- `PaymentFlow.charge` no longer loses track of money when the gateway
+  charge succeeds but the local update fails: it logs at CRITICAL (with
+  payment id and gateway result) and raises the new
+  `ReconciliationRequiredError`, which carries the gateway
+  `charge_result` for manual reconciliation. A gateway-declined charge
+  (`success=False`) is no longer ignored silently — the payment now
+  records a `FAILED` event and is persisted.
+- Registry hardening: `register`, `unregister` and `discover` now take
+  the registry lock; a plugin that fails to import (or does not provide
+  a `BaseProcessor` subclass) is skipped with a logged warning instead
+  of aborting discovery (or being skipped silently); registering a
+  backend with an empty slug raises `ValueError`.
+- Provider event dedupe (`applied_event_ids`) lookups are now O(1) via a
+  transient set view; the stored list representation in `provider_data`
+  is unchanged.
+- Removed the stale hardcoded version assertion from the test suite; the
+  package version is now only checked dynamically against installed
+  metadata.
+- Removed the dead `tests.yml` GitHub workflow (cookiecutter residue
+  targeting Python 3.7–3.10 via a nonexistent noxfile).
+
+### Added
+
+- `PaymentStatus.CANCELLED` (`"cancelled"`).
+- `BackendNotFoundError`, raised by `PluginRegistry.get_by_slug` for
+  unknown slugs. It subclasses both `GetPaidException` and `KeyError`,
+  so existing `except KeyError` code keeps working.
+- `ReconciliationRequiredError` (see above).
+
+---
+
 ## v3.0.1 (2026-06-05)
 
 ### Notes

@@ -115,6 +115,17 @@ class TestPrepareTransaction:
         assert result.redirect_url == "https://sandbox.example.com/pay"
 
 
+class TestVerifyCallbackFailsClosed:
+    @pytest.mark.asyncio
+    async def test_default_verify_callback_raises(self) -> None:
+        """The default verify_callback must fail closed: a processor that
+        does not explicitly implement (or explicitly opt out of) callback
+        verification must not silently accept unauthenticated callbacks."""
+        processor = DummyProcessor(cast("PaymentProtocol", ConcretePayment()))
+        with pytest.raises(NotImplementedError, match="verify_callback"):
+            await processor.verify_callback({}, {})
+
+
 class TestOptionalMethodsRaiseNotImplemented:
     @pytest.mark.asyncio
     async def test_handle_callback(self) -> None:

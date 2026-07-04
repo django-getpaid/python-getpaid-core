@@ -8,8 +8,10 @@ import pytest
 
 from getpaid_core.enums import PaymentEvent
 from getpaid_core.enums import PaymentStatus
+from getpaid_core.exceptions import BackendNotFoundError
 from getpaid_core.exceptions import InvalidCallbackError
 from getpaid_core.exceptions import InvalidTransitionError
+from getpaid_core.exceptions import ReconciliationRequiredError
 from getpaid_core.flow import PaymentFlow
 from getpaid_core.types import ChargeResult
 from getpaid_core.types import PaymentUpdate
@@ -41,8 +43,10 @@ class TestCreatePayment:
     @pytest.mark.asyncio
     async def test_unknown_backend_raises(self, flow):
         order = MockOrder()
-        with pytest.raises(KeyError):
+        with pytest.raises(BackendNotFoundError) as exc_info:
             await flow.create_payment(order, "nonexistent")
+        # Backwards compatible with pre-3.2 `except KeyError` callers.
+        assert isinstance(exc_info.value, KeyError)
 
 
 class TestPrepare:
@@ -198,6 +202,89 @@ class TestCharge:
 
         assert payment.status == PaymentStatus.IN_CHARGE
         assert payment.amount_paid == Decimal("0")
+
+
+class TestChargeFailurePaths:
+    @pytest.mark.asyncio
+    async def test_failed_charge_records_failed_attempt(self, flow, mock_repo):
+        """A gateway-declined charge must not return silently -- the
+        failure must be recorded on the payment and persisted."""
+        payment = MockPayment(
+            backend="mock",
+            status=PaymentStatus.PRE_AUTH,
+            amount_locked=Decimal("100.00"),
+        )
+        mock_repo._payments[payment.id] = payment
+
+        with patch.object(
+            MockProcessor,
+            "charge",
+            new_callable=AsyncMock,
+            return_value=ChargeResult(
+                amount_charged=Decimal("0"),
+                success=False,
+                provider_data={"error": "declined"},
+            ),
+        ):
+            result = await flow.charge(payment)
+
+        assert result.success is False
+        assert payment.status == PaymentStatus.FAILED
+        assert payment.provider_data["error"] == "declined"
+        assert mock_repo.save_calls == 1
+
+    @pytest.mark.asyncio
+    async def test_local_update_failure_after_gateway_success(
+        self, flow, mock_repo, caplog
+    ):
+        """If the gateway charge succeeded but the local update fails,
+        money moved with no local record: raise ReconciliationRequiredError
+        carrying the charge result and log at CRITICAL."""
+        payment = MockPayment(
+            backend="mock",
+            status=PaymentStatus.PRE_AUTH,
+            amount_locked=Decimal("100.00"),
+        )
+
+        with (
+            patch(
+                "getpaid_core.flow.apply_payment_update",
+                side_effect=InvalidTransitionError("boom"),
+            ),
+            pytest.raises(ReconciliationRequiredError) as exc_info,
+        ):
+            await flow.charge(payment)
+
+        exc = exc_info.value
+        assert isinstance(exc.charge_result, ChargeResult)
+        assert exc.charge_result.amount_charged == Decimal("100.00")
+        assert exc.context["payment_id"] == payment.id
+        assert isinstance(exc.__cause__, InvalidTransitionError)
+
+        critical = [r for r in caplog.records if r.levelname == "CRITICAL"]
+        assert len(critical) == 1
+        assert payment.id in critical[0].getMessage()
+
+    @pytest.mark.asyncio
+    async def test_save_failure_after_gateway_success(self, flow, mock_repo):
+        """Repository save failures after a successful gateway charge
+        must also surface as ReconciliationRequiredError."""
+        payment = MockPayment(
+            backend="mock",
+            status=PaymentStatus.PRE_AUTH,
+            amount_locked=Decimal("100.00"),
+        )
+
+        with (
+            patch.object(
+                mock_repo,
+                "save",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("db down"),
+            ),
+            pytest.raises(ReconciliationRequiredError),
+        ):
+            await flow.charge(payment)
 
 
 class TestRefunds:

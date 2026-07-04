@@ -14,7 +14,8 @@ Payments move through these states:
 | `PAID` | `"paid"` | Fully paid |
 | `FAILED` | `"failed"` | Payment failed |
 | `REFUND_STARTED` | `"refund_started"` | Refund initiated |
-| `REFUNDED` | `"refunded"` | Fully refunded or lock released |
+| `REFUNDED` | `"refunded"` | Fully refunded (money moved back to the buyer) |
+| `CANCELLED` | `"cancelled"` | Pre-auth lock released with nothing captured |
 
 ## Payment Events
 
@@ -27,17 +28,20 @@ failed           -> FAILED
 refund_requested -> REFUND_STARTED
 refund_confirmed -> PARTIAL or REFUNDED
 refund_cancelled -> active paid status
-lock_released    -> REFUNDED
+lock_released    -> CANCELLED (nothing paid) or REFUNDED (partially captured)
 ```
 
 ### Transition Rules
 
 The state engine raises `InvalidTransitionError` when an event is incompatible
-with the current payment state.
+with the current payment state. This applies to *every* event, including
+`prepared` and `locked` — there are no silently ignored events.
 
 - You cannot capture a payment after it is already refunded.
 - You cannot start a refund before the payment has been paid.
 - Refund confirmation moves to `REFUNDED` only when `amount_refunded >= amount_paid`.
+- Releasing a pre-auth lock with nothing captured marks the payment
+  `CANCELLED`; if some amount was already captured, it becomes `REFUNDED`.
 
 ### Amount Handling
 
@@ -138,8 +142,17 @@ GetPaidException
 │   └── RefundFailure
 ├── CredentialsError
 ├── InvalidCallbackError
-└── InvalidTransitionError
+├── InvalidTransitionError
+├── ReconciliationRequiredError
+└── BackendNotFoundError (also a KeyError)
 ```
+
+`BackendNotFoundError` is raised by `registry.get_by_slug()` for unknown
+slugs; it also subclasses `KeyError` so legacy `except KeyError` code keeps
+working. `ReconciliationRequiredError` is raised by `PaymentFlow.charge()`
+when the gateway charge succeeded but recording it locally failed — it
+carries the gateway result in its `charge_result` attribute so operators
+can reconcile the payment manually.
 
 All exceptions accept an optional `context` dict for structured error info:
 

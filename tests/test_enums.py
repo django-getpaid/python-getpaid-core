@@ -12,6 +12,7 @@ class TestPaymentStatus:
     def test_values(self) -> None:
         assert PaymentStatus.NEW == "new"
         assert PaymentStatus.PAID == "paid"
+        assert PaymentStatus.CANCELLED == "cancelled"
 
 
 class TestFraudStatus:

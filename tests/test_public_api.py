@@ -4,8 +4,12 @@ import getpaid_core
 
 
 class TestPublicAPI:
-    def test_version(self) -> None:
-        assert getpaid_core.__version__ == "3.0.0"
+    def test_version_is_exported(self) -> None:
+        # The actual version value is checked dynamically against the
+        # installed package metadata in tests/test_version.py -- never
+        # hardcode a version string here, it goes stale on every release.
+        assert isinstance(getpaid_core.__version__, str)
+        assert getpaid_core.__version__
 
     def test_exports_enums(self) -> None:
         assert getpaid_core.PaymentStatus is not None
