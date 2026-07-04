@@ -10,4 +10,4 @@
 /src/*.egg-info/
 __pycache__/
 /.idea/
-/uv.lock
+
