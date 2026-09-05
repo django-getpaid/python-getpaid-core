@@ -1,8 +1,7 @@
 # Context: getpaid-core
 
 Ubiquitous language for the getpaid payment-processing core. Glossary only —
-implementation decisions live in ADRs and the wayfinder map
-(http://192.168.129.37:30008/minder/python-getpaid-core/issues/1).
+implementation decisions live in ADRs and the configured project work tracker.
 
 ## Terms
 
