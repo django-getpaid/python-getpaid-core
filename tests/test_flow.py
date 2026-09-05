@@ -367,3 +367,83 @@ class TestPreconditions:
 
         with pytest.raises(InvalidTransitionError, match="Cannot start refund"):
             await flow.start_refund(payment)
+
+    @pytest.mark.asyncio
+    async def test_prepare_requires_new(self, flow):
+        payment = MockPayment(backend="mock", status=PaymentStatus.PAID)
+
+        with pytest.raises(InvalidTransitionError, match="Cannot prepare"):
+            await flow.prepare(payment)
+
+    @pytest.mark.asyncio
+    async def test_repeated_prepare_makes_no_api_call(self, flow, mock_repo):
+        """A second prepare must not create another provider order."""
+        payment = MockPayment(
+            backend="mock",
+            status=PaymentStatus.PREPARED,
+            external_id="ext-pay-1",
+        )
+
+        with patch.object(
+            MockProcessor,
+            "prepare_transaction",
+            new_callable=AsyncMock,
+        ) as mock_prepare:
+            with pytest.raises(InvalidTransitionError):
+                await flow.prepare(payment)
+            mock_prepare.assert_not_called()
+
+        assert payment.external_id == "ext-pay-1"
+        assert payment.status == PaymentStatus.PREPARED
+        assert mock_repo.save_calls == 0
+
+    @pytest.mark.asyncio
+    async def test_prepare_on_paid_makes_no_api_call(self, flow, mock_repo):
+        """Preparing a paid payment must not reach the provider."""
+        payment = MockPayment(
+            backend="mock",
+            status=PaymentStatus.PAID,
+            amount_paid=Decimal("100.00"),
+            external_id="ext-pay-1",
+        )
+
+        with patch.object(
+            MockProcessor,
+            "prepare_transaction",
+            new_callable=AsyncMock,
+        ) as mock_prepare:
+            with pytest.raises(InvalidTransitionError):
+                await flow.prepare(payment)
+            mock_prepare.assert_not_called()
+
+        assert payment.external_id == "ext-pay-1"
+        assert payment.status == PaymentStatus.PAID
+        assert mock_repo.save_calls == 0
+
+    @pytest.mark.asyncio
+    async def test_cancel_refund_requires_refundable_status(self, flow):
+        payment = MockPayment(backend="mock", status=PaymentStatus.NEW)
+
+        with pytest.raises(
+            InvalidTransitionError, match="Cannot cancel refund"
+        ):
+            await flow.cancel_refund(payment)
+
+    @pytest.mark.asyncio
+    async def test_cancel_refund_makes_no_api_call_when_invalid(
+        self, flow, mock_repo
+    ):
+        """Cancelling a refund that cannot exist must not reach the provider."""
+        payment = MockPayment(backend="mock", status=PaymentStatus.NEW)
+
+        with patch.object(
+            MockProcessor,
+            "cancel_refund",
+            new_callable=AsyncMock,
+        ) as mock_cancel:
+            with pytest.raises(InvalidTransitionError):
+                await flow.cancel_refund(payment)
+            mock_cancel.assert_not_called()
+
+        assert payment.status == PaymentStatus.NEW
+        assert mock_repo.save_calls == 0

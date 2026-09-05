@@ -76,6 +76,11 @@ class PaymentFlow:
             payment=payment,
             kwargs=dict(kwargs),
         )
+        if payment.status != PaymentStatus.NEW:
+            raise InvalidTransitionError(
+                f"Cannot prepare payment in {payment.status!r} status. "
+                "Payment must be NEW."
+            )
         processor = self.get_processor(payment)
         result = await processor.prepare_transaction(**context["kwargs"])
         apply_payment_update(
@@ -286,6 +291,15 @@ class PaymentFlow:
             payment=payment,
             kwargs=dict(kwargs),
         )
+        if payment.status not in {
+            PaymentStatus.REFUND_STARTED,
+            PaymentStatus.PAID,
+            PaymentStatus.PARTIAL,
+        }:
+            raise InvalidTransitionError(
+                f"Cannot cancel refund for payment in {payment.status!r} "
+                "status. Payment must be REFUND_STARTED, PAID, or PARTIAL."
+            )
         processor = self.get_processor(payment)
         success = await processor.cancel_refund(**context["kwargs"])
         if success:
