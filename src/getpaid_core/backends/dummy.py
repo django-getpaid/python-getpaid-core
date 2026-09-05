@@ -1,6 +1,7 @@
 """Dummy payment backend for development and testing."""
 
 from collections.abc import Sequence
+from decimal import Context
 from decimal import Decimal
 from typing import ClassVar
 
@@ -22,11 +23,28 @@ def _fallback_event_id(family: str, payment_id: str, amount: Decimal) -> str:
     within it. A payment-wide ID would make the core dedupe treat every
     update after the first as a replay and discard it.
 
-    The amount is normalized, so callbacks reporting the same cumulative
-    total in different notations (``"40"``, ``"40.00"``) name one event
-    and the second is correctly deduped.
+    The amount is canonicalized, so callbacks reporting the same
+    cumulative total in different notations (``"40"``, ``"40.00"``) name
+    one event and the second is correctly deduped.
     """
-    return f"{family}:{payment_id}:{amount.normalize():f}"
+    return f"{family}:{payment_id}:{_canonical_amount(amount)}"
+
+
+def _canonical_amount(amount: Decimal) -> str:
+    """Render ``amount`` as one lossless, context-independent string.
+
+    ``Decimal.normalize()`` alone would strip trailing zeros *and* round
+    to the active context precision, so two totals that differ only
+    below that precision (``40.01`` and ``40.02`` under ``prec=3``) would
+    collapse into one event ID and the later update would be discarded as
+    a replay. Normalizing in a context sized to the value's own
+    significant digits strips the trailing zeros without ever rounding,
+    which keeps the ID both stable across Decimal contexts and distinct
+    for every distinct total.
+    """
+    digits = len(amount.as_tuple().digits)
+    canonical = amount.normalize(context=Context(prec=max(digits, 1)))
+    return f"{canonical:f}"
 
 
 class DummyProcessor(BaseProcessor):

@@ -1,6 +1,7 @@
 """Tests for the built-in dummy payment backend."""
 
 from decimal import Decimal
+from decimal import localcontext
 from typing import cast
 
 import pytest
@@ -319,6 +320,108 @@ class TestDummyFallbackEventIds:
                 {},
             )
 
+        assert payment.provider_data["applied_event_ids"] == [
+            "payment:pay-1:40"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_totals_differing_below_context_precision(
+        self, dummy_flow: PaymentFlow
+    ) -> None:
+        """Distinct totals stay distinct events even when the active
+        Decimal context cannot represent the difference between them."""
+        payment = MockPayment(backend="dummy", status=PaymentStatus.PREPARED)
+
+        with localcontext() as ctx:
+            ctx.prec = 3
+            for paid_amount in ("40.01", "40.02"):
+                await dummy_flow.handle_callback(
+                    cast("PaymentProtocol", payment),
+                    {
+                        "event": "payment_confirmed",
+                        "paid_amount": paid_amount,
+                    },
+                    {},
+                )
+
+        assert payment.amount_paid == Decimal("40.02")
+        assert payment.provider_data["applied_event_ids"] == [
+            "payment:pay-1:40.01",
+            "payment:pay-1:40.02",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_refund_totals_differing_below_context_precision(
+        self, dummy_flow: PaymentFlow
+    ) -> None:
+        """The refund family carries the same guarantee."""
+        payment = MockPayment(
+            backend="dummy",
+            status=PaymentStatus.PAID,
+            amount_paid=Decimal("100.00"),
+        )
+
+        with localcontext() as ctx:
+            ctx.prec = 3
+            for refunded_amount in ("40.01", "40.02"):
+                await dummy_flow.handle_callback(
+                    cast("PaymentProtocol", payment),
+                    {
+                        "event": "refund_confirmed",
+                        "refunded_amount": refunded_amount,
+                    },
+                    {},
+                )
+
+        assert payment.amount_refunded == Decimal("40.02")
+        assert payment.provider_data["applied_event_ids"] == [
+            "refund:pay-1:40.01",
+            "refund:pay-1:40.02",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_totals_differing_below_default_precision(
+        self, dummy_flow: PaymentFlow
+    ) -> None:
+        """Even the default context precision must not merge totals."""
+        payment = MockPayment(backend="dummy", status=PaymentStatus.PREPARED)
+        totals = (
+            "40.000000000000000000000000001",
+            "40.000000000000000000000000002",
+        )
+
+        for paid_amount in totals:
+            await dummy_flow.handle_callback(
+                cast("PaymentProtocol", payment),
+                {"event": "payment_confirmed", "paid_amount": paid_amount},
+                {},
+            )
+
+        assert payment.amount_paid == Decimal(totals[1])
+        assert payment.provider_data["applied_event_ids"] == [
+            f"payment:pay-1:{totals[0]}",
+            f"payment:pay-1:{totals[1]}",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_replay_identity_is_stable_across_contexts(
+        self, dummy_flow: PaymentFlow
+    ) -> None:
+        """One total keeps one ID whatever context the callback arrives
+        in, so a replay is still recognized as a replay."""
+        payment = MockPayment(backend="dummy", status=PaymentStatus.PREPARED)
+        callback = {"event": "payment_confirmed", "paid_amount": "40.00"}
+
+        with localcontext() as ctx:
+            ctx.prec = 3
+            await dummy_flow.handle_callback(
+                cast("PaymentProtocol", payment), dict(callback), {}
+            )
+        await dummy_flow.handle_callback(
+            cast("PaymentProtocol", payment), dict(callback), {}
+        )
+
+        assert payment.amount_paid == Decimal("40.00")
         assert payment.provider_data["applied_event_ids"] == [
             "payment:pay-1:40"
         ]
