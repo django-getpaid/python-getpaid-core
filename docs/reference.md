@@ -64,6 +64,14 @@
    :undoc-members:
 ```
 
+## Durable Flow
+
+```{eval-rst}
+.. automodule:: getpaid_core.durable.flow
+   :members:
+   :undoc-members:
+```
+
 ## Adapter Conformance
 
 ```{eval-rst}

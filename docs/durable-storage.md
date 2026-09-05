@@ -36,6 +36,13 @@ that run inside it — `plan_observation`, `plan_reservation` and
 `supports_durable_state(repository)` answers whether an adapter qualifies;
 `missing_durable_operations(repository)` names what is absent.
 
+Alongside the money, facts carry `reconciliation_required`. Evidence that
+cannot be applied consistently — a provider event identity reused with
+different content, for instance — sets it, and it commits with the facts.
+Reconciliation is therefore discoverable from stored state rather than
+from an exception, a log line or whatever object the caller happens to
+hold.
+
 ## Optional, adapter-owned choices
 
 Everything below is the adapter's decision, and core prescribes none of
@@ -78,11 +85,14 @@ two transactions. The exception carries this distinction as
 
 `require_durable_state(repository, operation=...)` raises
 `UnsupportedRepositoryError` when the repository cannot commit
-atomically. Call it **before** provider I/O for any money-moving
-operation, as `PaymentFlow.reserve_operation()` does. There is
-deliberately no fallback to reading a snapshot and saving it
-unconditionally: an adapter that cannot make the guarantee must not move
-money in a way that claims it.
+atomically, naming exactly which operations are missing.
+`DurablePaymentFlow` calls it at construction, so an unsupported adapter
+is refused before any financial command can reach a provider.
+
+There is deliberately no fallback to reading a snapshot and saving it
+unconditionally, and no capability sniffing that quietly picks a weaker
+path: an adapter that cannot make the guarantee must not move money in a
+way that claims it.
 
 ## Proving an adapter conforms
 
@@ -101,18 +111,20 @@ async def factory(facts):
 await run_conformance_suite(factory)   # raises ConformanceError on failure
 ```
 
-The suite drives the repository through **independent workers** and reads
-state back through the repository, never through an object it handed out
-earlier. That distinction matters: a shared mutable fake passes races it
-should fail, so it is not evidence. The checks cover a stale cumulative
-capture racing a full one, a capture racing a refund, duplicate versus
-distinct event identities, discovery of unresolved work, and refusal of
+The suite drives the repository through **independent concurrent
+callers**, each holding its own detached snapshot, and reads state back
+through the repository, never through an object it handed out earlier.
+That distinction matters: a shared mutable fake passes races it should
+fail, so it is not evidence. The checks cover a stale cumulative capture
+racing a full one, a capture racing a refund, duplicate versus distinct
+event identities, discovery of unresolved work, and refusal of
 overlapping commands.
 
-Passing proves the semantic contract against your own storage. It proves
-nothing about a live provider, and nothing about behaviour under a real
-database's isolation level that the suite does not exercise. Framework
-wrappers still need their own tests for transactional behaviour and for
+Those callers are concurrent tasks, not separate processes. Passing
+proves the semantic contract against your own storage; it proves nothing
+about a live provider, and it cannot provoke every interleaving a real
+deployment produces. An adapter whose atomicity rests on a database still
+needs its own multi-process and isolation-level tests, plus tests for
 migration and cutover.
 
 `InMemoryDurableRepository` is a reference implementation to read and to
@@ -121,29 +133,31 @@ rejects for real deployments; it is not production storage.
 
 ## The next-major adapter upgrade boundary
 
-The contract ships in a **breaking major release**. Until an adapter
-provides the mandatory operations, `PaymentFlow` keeps the released 3.x
-behaviour for callbacks and polling — the caller's object is updated and
-saved — and that path makes none of the guarantees on this page. As soon
-as the repository qualifies, both route through the durable boundary and
-return the committed plan instead:
+The contract ships in a **breaking major release**, and the cutover is an
+explicit choice of flow class rather than something core infers from the
+adapter:
 
-| Call | 3.x repository | Durable repository |
-|------|----------------|--------------------|
+| | `PaymentFlow` | `DurablePaymentFlow` |
+|-|---------------|----------------------|
+| Repository | `PaymentRepository` (released 3.x) | `DurablePaymentRepository`, checked at construction |
 | `handle_callback()` | Updates and saves the caller's payment, returns `None` | Commits to current state, returns `ObservationPlan` |
 | `fetch_and_update_status()` | Updates and saves the caller's payment, returns it | Commits to current state, returns `ObservationPlan` |
-| `reserve_operation()` | `UnsupportedRepositoryError` | Returns the committed `OperationRecord` |
-| `record_operation_outcome()` | `UnsupportedRepositoryError` | Returns the committed `OutcomePlan` |
+| `reserve_operation()` / `record_operation_outcome()` | — | Returns the committed record or plan |
+| Atomicity across workers | None claimed | Guaranteed by the adapter's boundary |
 
-A framework wrapper may still accept a model instance for ergonomics, but
-only its identity is authoritative. Previously loaded objects may be
-stale, and their financial fields are never written back.
+`PaymentFlow` is unchanged from the release: it makes none of the
+guarantees on this page, and nothing in it consults the durable contract.
+`DurablePaymentFlow` never writes a caller-supplied object. A framework
+wrapper may still accept a model instance for ergonomics, but only its
+identity is authoritative; previously loaded objects may be stale, and
+their financial fields are never written back.
 
 Upgrading an integration therefore means: implement the mandatory
-operations, pass the conformance suite, and stop reading the return value
-of `handle_callback()`/`fetch_and_update_status()` as a payment object.
+operations, pass the conformance suite, switch to `DurablePaymentFlow`,
+and read the returned `ObservationPlan` instead of the payment object.
 The ADR additionally requires a coordinated writer cutover — old
-unconditional-save workers must stop before new-contract writes begin.
+unconditional-save workers must stop before new-contract writes begin,
+and the two flows must not write the same payment state.
 
 ## Not in this layer
 

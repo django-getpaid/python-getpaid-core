@@ -2,9 +2,17 @@
 
 Adapters run this suite against their own storage. Every check drives the
 repository through its public semantic operations from **independent
-workers**, and reads state back through the repository rather than
-through an object it handed out earlier -- a shared mutable fake passes
-races it should fail, so it is not evidence.
+concurrent callers**, each holding its own detached snapshot, and reads
+state back through the repository rather than through an object it handed
+out earlier -- a shared mutable fake passes races it should fail, so it
+is not evidence.
+
+The callers here are concurrent tasks, not separate processes: what the
+suite exercises is that no caller's read-plan-commit can be interleaved
+into losing another's committed state. It cannot, on its own, provoke
+every interleaving a real deployment produces, so an adapter whose
+atomicity depends on a database must also run its own multi-process and
+isolation-level tests.
 
 The suite covers what ADR 0001 requires of this layer: a stale cumulative
 capture cannot regress committed funds, a capture racing a refund keeps

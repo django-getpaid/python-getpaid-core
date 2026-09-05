@@ -26,7 +26,6 @@ from getpaid_core.durable.records import OutcomePlan
 from getpaid_core.durable.records import PaymentFacts
 from getpaid_core.durable.records import ReplayRecord
 from getpaid_core.durable.records import ReservationPlan
-from getpaid_core.durable.records import observation_digest
 from getpaid_core.enums import PaymentEvent
 from getpaid_core.exceptions import InvalidTransitionError
 from getpaid_core.exceptions import OperationConflictError
@@ -62,10 +61,12 @@ class _FactsPayment:
         self.fraud_status = facts.fraud_status
         self.fraud_message = facts.fraud_message
         self.provider_data: dict[str, Any] = dict(facts.provider_data)
+        self._payment_id = facts.payment_id
+        self._reconciliation_required = facts.reconciliation_required
 
-    def to_facts(self, payment_id: str) -> PaymentFacts:
+    def to_facts(self) -> PaymentFacts:
         return PaymentFacts(
-            payment_id=payment_id,
+            payment_id=self._payment_id,
             amount_required=self.amount_required,
             captured_funds=self.amount_paid,
             refunded_funds=self.amount_refunded,
@@ -74,6 +75,7 @@ class _FactsPayment:
             external_id=self.external_id,
             fraud_status=self.fraud_status,
             fraud_message=self.fraud_message,
+            reconciliation_required=self._reconciliation_required,
             provider_data=self.provider_data,
         )
 
@@ -89,7 +91,7 @@ def _apply_to_facts(facts: PaymentFacts, update: PaymentUpdate) -> PaymentFacts:
     apply_payment_update(
         cast("Payment", view), replace(update, provider_event_id=None)
     )
-    return view.to_facts(facts.payment_id)
+    return view.to_facts()
 
 
 def plan_observation(
@@ -111,44 +113,28 @@ def plan_observation(
     than a blanket ignored exception.
     """
     if update is None:
-        return ObservationPlan(
-            facts=facts,
-            replay_record=None,
-            applied=False,
-            reason="no observation",
-        )
+        return ObservationPlan(facts=facts, replay_record=None, applied=False)
 
     record: ReplayRecord | None = None
     if update.provider_event_id:
-        digest = observation_digest(update)
+        record = ReplayRecord.for_observation(facts.payment_id, update)
         for known in replay_log:
-            if known.event_identity != update.provider_event_id:
+            if known.event_identity != record.event_identity:
                 continue
-            if known.content_digest == digest:
+            if known.content_digest == record.content_digest:
                 return ObservationPlan(
-                    facts=facts,
-                    replay_record=None,
-                    applied=False,
-                    reason="duplicate event identity",
+                    facts=facts, replay_record=None, applied=False
                 )
             return ObservationPlan(
-                facts=facts,
+                facts=replace(facts, reconciliation_required=True),
                 replay_record=None,
                 applied=False,
-                reconciliation_required=True,
-                reason="event identity reused with different content",
             )
-        record = ReplayRecord(
-            payment_id=facts.payment_id,
-            event_identity=update.provider_event_id,
-            content_digest=digest,
-        )
 
     return ObservationPlan(
         facts=_apply_to_facts(facts, update),
         replay_record=record,
         applied=True,
-        reason="observation applied",
     )
 
 
@@ -171,7 +157,7 @@ def _resolve_amount(
     The result is frozen onto the reservation: a same-ID retry reuses it
     rather than reselecting a default against a later balance.
     """
-    operation_type = OperationType(intent.operation_type)
+    operation_type = intent.operation_type
 
     if operation_type in {OperationType.PREPARE, OperationType.CANCEL_REFUND}:
         return None
@@ -214,7 +200,7 @@ def _blocking_operation(
         if record.operation_id == intent.operation_id:
             continue
         if (
-            OperationType(intent.operation_type) is OperationType.CANCEL_REFUND
+            intent.operation_type is OperationType.CANCEL_REFUND
             and record.operation_id == target
         ):
             continue
@@ -229,7 +215,7 @@ def _cancellation_target(
     target = intent.parameters.get("target_operation_id")
     matched = any(
         record.operation_id == target
-        and OperationType(record.operation_type) is OperationType.START_REFUND
+        and record.operation_type is OperationType.START_REFUND
         and record.is_active
         for record in operations
     )
@@ -273,14 +259,14 @@ def plan_reservation(
             )
         return ReservationPlan(operation=record, created=False)
 
-    if OperationType(intent.operation_type) is OperationType.CANCEL_REFUND:
+    if intent.operation_type is OperationType.CANCEL_REFUND:
         _cancellation_target(operations, intent)
 
     blocker = _blocking_operation(operations, intent)
     if blocker is not None:
         raise OperationConflictError(
             f"Operation {blocker.operation_id!r} is still "
-            f"{OperationState(blocker.state).value!r} on payment "
+            f"{blocker.state.value!r} on payment "
             f"{facts.payment_id!r}; resolve it before reserving "
             f"{intent.operation_id!r}.",
             context={
@@ -293,7 +279,7 @@ def plan_reservation(
         operation=OperationRecord(
             payment_id=facts.payment_id,
             operation_id=intent.operation_id,
-            operation_type=OperationType(intent.operation_type),
+            operation_type=intent.operation_type,
             state=OperationState.RESERVED,
             resolved_amount=_resolve_amount(facts, intent),
             parameters_digest=digest,
@@ -313,7 +299,7 @@ def _settlement_update(
     settled amount, never from whatever the payment holds now: a callback
     that already reported the same money must not be counted twice.
     """
-    operation_type = OperationType(operation.operation_type)
+    operation_type = operation.operation_type
     settled = (
         operation.resolved_amount
         if outcome.settled_amount is None
@@ -356,7 +342,7 @@ def plan_outcome(
     outcome -- including ``UNKNOWN`` -- moves no money and leaves the
     operation discoverable as unresolved work.
     """
-    current = OperationState(operation.state)
+    current = operation.state
     if current in TERMINAL_OPERATION_STATES:
         if outcome.state is not current:
             raise InvalidTransitionError(

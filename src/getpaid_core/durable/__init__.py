@@ -9,6 +9,7 @@ storage, transactions and scheduling.
 from getpaid_core.durable.conformance import CONFORMANCE_CHECKS
 from getpaid_core.durable.conformance import RepositoryFactory
 from getpaid_core.durable.conformance import run_conformance_suite
+from getpaid_core.durable.flow import DurablePaymentFlow
 from getpaid_core.durable.memory import InMemoryDurableRepository
 from getpaid_core.durable.records import ACTIVE_OPERATION_STATES
 from getpaid_core.durable.records import TERMINAL_OPERATION_STATES
@@ -39,6 +40,7 @@ __all__ = [
     "CONFORMANCE_CHECKS",
     "MANDATORY_OPERATIONS",
     "TERMINAL_OPERATION_STATES",
+    "DurablePaymentFlow",
     "DurablePaymentRepository",
     "InMemoryDurableRepository",
     "ObservationPlan",

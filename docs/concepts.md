@@ -190,9 +190,10 @@ class DurablePaymentRepository(Protocol):
 ```
 
 Every operation addresses a payment by identity, applies core's rules to
-the payment's *current* stored state, and returns committed state. When a
-repository provides all of them, `PaymentFlow` routes callbacks and
-polling through it instead of saving the caller's object. See
+the payment's *current* stored state, and returns committed state.
+`getpaid_core.durable.DurablePaymentFlow` orchestrates against it and
+refuses any repository that does not implement it; `PaymentFlow` keeps
+the released behaviour over `PaymentRepository`. See
 [Durable Storage Contract](durable-storage.md) for the mandatory and
 optional capabilities and the upgrade boundary.
 

@@ -20,6 +20,7 @@ from typing import Any
 
 from getpaid_core.enums import FraudStatus
 from getpaid_core.enums import PaymentStatus
+from getpaid_core.exceptions import InvalidTransitionError
 from getpaid_core.types import PaymentUpdate
 
 
@@ -87,6 +88,11 @@ class PaymentFacts:
     This is the *logical* payment core reasons about. It carries no
     caller-owned model instance: an adapter reads current facts, core
     plans a transition against them, and the adapter commits the result.
+
+    ``reconciliation_required`` is recorded independently of the money:
+    evidence that could not be applied consistently is discoverable from
+    stored state rather than from an exception, a log line or whatever
+    object happened to be in the caller's hands.
     """
 
     payment_id: str
@@ -98,6 +104,7 @@ class PaymentFacts:
     external_id: str | None = None
     fraud_status: str = FraudStatus.UNKNOWN
     fraud_message: str = ""
+    reconciliation_required: bool = False
     provider_data: Mapping[str, Any] = field(default=_EMPTY)
 
     def __post_init__(self) -> None:
@@ -124,7 +131,7 @@ class ReplayRecord:
     ) -> "ReplayRecord":
         """Build the record a given observation would commit."""
         if not update.provider_event_id:
-            raise ValueError(
+            raise InvalidTransitionError(
                 "A replay record requires a provider event identity."
             )
         return cls(
@@ -212,10 +219,16 @@ class OperationRecord:
     correlation: str | None = None
     reconciliation_required: bool = False
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "operation_type", OperationType(self.operation_type)
+        )
+        object.__setattr__(self, "state", OperationState(self.state))
+
     @property
     def is_active(self) -> bool:
         """Whether this operation still holds the payment."""
-        return OperationState(self.state) in ACTIVE_OPERATION_STATES
+        return self.state in ACTIVE_OPERATION_STATES
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,15 +253,16 @@ class ObservationPlan:
     """What an adapter must commit for one provider observation.
 
     ``facts`` and ``replay_record`` commit together or not at all. When
-    ``applied`` is false the observation added no new evidence and the
-    adapter commits nothing.
+    ``applied`` is false the observation added no new financial evidence,
+    but ``facts`` may still differ from what was read -- a reused event
+    identity carrying different content sets
+    ``facts.reconciliation_required`` -- so the adapter commits ``facts``
+    either way.
     """
 
     facts: PaymentFacts
     replay_record: ReplayRecord | None
     applied: bool
-    reconciliation_required: bool = False
-    reason: str = ""
 
 
 @dataclass(frozen=True, slots=True)

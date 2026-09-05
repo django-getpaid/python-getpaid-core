@@ -37,7 +37,10 @@ class DurablePaymentRepository(Protocol):
     """Mandatory storage semantics for money-moving operations."""
 
     async def get_payment_facts(self, payment_id: str) -> PaymentFacts:
-        """Return the payment's current committed financial facts."""
+        """Return the payment's current committed financial facts.
+
+        Raises ``KeyError`` when no payment carries that identity.
+        """
         ...
 
     async def reserve_operation(
@@ -153,10 +156,9 @@ async def commit_semantic_transition[T](
     """
     if attempts < 1:
         raise ValueError("attempts must be at least 1.")
-    for remaining in range(attempts - 1, -1, -1):
+    for _ in range(attempts - 1):
         try:
             return await commit()
         except StateConflictError:
-            if not remaining:
-                raise
-    raise AssertionError("unreachable")  # pragma: no cover
+            continue
+    return await commit()

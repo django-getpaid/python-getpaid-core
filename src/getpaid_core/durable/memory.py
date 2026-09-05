@@ -55,10 +55,9 @@ class InMemoryDurableRepository:
                 self._replay.setdefault(payment_id, []),
                 update,
             )
-            if plan.applied:
-                self._facts[payment_id] = plan.facts
-                if plan.replay_record is not None:
-                    self._replay[payment_id].append(plan.replay_record)
+            self._facts[payment_id] = plan.facts
+            if plan.replay_record is not None:
+                self._replay[payment_id].append(plan.replay_record)
             return plan
 
     async def reserve_operation(

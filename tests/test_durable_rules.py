@@ -47,7 +47,7 @@ def test_capture_observation_commits_facts_and_replay_record():
     assert plan.facts.status == PaymentStatus.PAID
     assert plan.replay_record is not None
     assert plan.replay_record.event_identity == "full"
-    assert plan.reconciliation_required is False
+    assert plan.facts.reconciliation_required is False
 
 
 def test_stale_cumulative_capture_never_regresses_committed_funds():
@@ -92,7 +92,7 @@ def test_reused_event_identity_with_different_content_requires_reconciliation():
     )
 
     assert plan.applied is False
-    assert plan.reconciliation_required is True
+    assert plan.facts.reconciliation_required is True
     assert plan.facts.captured_funds == Decimal("40.00")
 
 

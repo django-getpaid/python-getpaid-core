@@ -1,10 +1,11 @@
-"""The flow's current-state boundary over a durable repository."""
+"""The flow boundary over a durable repository."""
 
 import asyncio
 from decimal import Decimal
 
 import pytest
 
+from getpaid_core.durable import DurablePaymentFlow
 from getpaid_core.durable import InMemoryDurableRepository
 from getpaid_core.durable import OperationIntent
 from getpaid_core.durable import OperationOutcome
@@ -13,7 +14,6 @@ from getpaid_core.durable import OperationType
 from getpaid_core.durable import PaymentFacts
 from getpaid_core.enums import PaymentStatus
 from getpaid_core.exceptions import UnsupportedRepositoryError
-from getpaid_core.flow import PaymentFlow
 from tests.conftest import MockPayment
 from tests.conftest import MockRepository
 
@@ -32,8 +32,8 @@ def durable_repo() -> InMemoryDurableRepository:
 
 
 @pytest.fixture
-def durable_flow(durable_repo, mock_registry) -> PaymentFlow:
-    return PaymentFlow(durable_repo, registry=mock_registry)
+def durable_flow(durable_repo, mock_registry) -> DurablePaymentFlow:
+    return DurablePaymentFlow(durable_repo, registry=mock_registry)
 
 
 def confirmation(paid_amount: str, event_id: str) -> dict:
@@ -53,7 +53,6 @@ async def test_callback_commits_to_current_state_and_returns_it(
         stale, confirmation("100.00", "full"), {}
     )
 
-    assert plan is not None
     assert plan.facts.captured_funds == Decimal("100.00")
     assert plan.facts.status == PaymentStatus.PAID
     committed = await durable_repo.get_payment_facts("pay-1")
@@ -61,7 +60,7 @@ async def test_callback_commits_to_current_state_and_returns_it(
 
 
 async def test_callback_never_writes_the_caller_supplied_snapshot(
-    durable_flow, durable_repo
+    durable_flow,
 ):
     stale = MockPayment(status=PaymentStatus.PREPARED)
 
@@ -95,9 +94,7 @@ async def test_independent_callbacks_cannot_erase_committed_funds(
     assert committed.status == PaymentStatus.PAID
 
 
-async def test_polling_shares_the_same_atomic_boundary(
-    durable_flow, durable_repo
-):
+async def test_polling_shares_the_same_atomic_boundary(durable_flow):
     stale = MockPayment(status=PaymentStatus.PREPARED)
 
     plan = await durable_flow.fetch_and_update_status(stale)
@@ -106,34 +103,11 @@ async def test_polling_shares_the_same_atomic_boundary(
     assert stale.amount_paid == Decimal("0")
 
 
-async def test_legacy_repository_keeps_the_released_behaviour(mock_registry):
-    repository = MockRepository()
-    payment = MockPayment(status=PaymentStatus.PREPARED)
-    repository._payments["pay-1"] = payment
-    flow = PaymentFlow(repository, registry=mock_registry)
-
-    result = await flow.handle_callback(
-        payment, confirmation("100.00", "full"), {}
-    )
-
-    assert result is None
-    assert payment.amount_paid == Decimal("100.00")
-    assert repository.save_calls == 1
-
-
-async def test_reservation_is_refused_before_an_unsupported_submission(
+async def test_an_unsupported_repository_is_refused_at_construction(
     mock_registry,
 ):
-    flow = PaymentFlow(MockRepository(), registry=mock_registry)
-    payment = MockPayment(status=PaymentStatus.PRE_AUTH)
-
-    with pytest.raises(UnsupportedRepositoryError, match="charge"):
-        await flow.reserve_operation(
-            payment,
-            OperationIntent(
-                operation_id="op-1", operation_type=OperationType.CHARGE
-            ),
-        )
+    with pytest.raises(UnsupportedRepositoryError, match="reserve_operation"):
+        DurablePaymentFlow(MockRepository(), registry=mock_registry)
 
 
 async def test_reserve_then_record_outcome_addresses_the_payment_by_identity(
@@ -149,7 +123,7 @@ async def test_reserve_then_record_outcome_addresses_the_payment_by_identity(
             )
         ]
     )
-    flow = PaymentFlow(repository, registry=mock_registry)
+    flow = DurablePaymentFlow(repository, registry=mock_registry)
     stale = MockPayment(status=PaymentStatus.PRE_AUTH)
     intent = OperationIntent(
         operation_id="op-1", operation_type=OperationType.CHARGE
@@ -164,3 +138,23 @@ async def test_reserve_then_record_outcome_addresses_the_payment_by_identity(
 
     assert plan.facts.captured_funds == Decimal("100.00")
     assert stale.amount_paid == Decimal("0")
+
+
+async def test_released_flow_is_untouched_by_the_durable_contract(
+    mock_registry,
+):
+    """``PaymentFlow`` keeps the 3.x behaviour; it does not sniff adapters."""
+    from getpaid_core.flow import PaymentFlow
+
+    repository = MockRepository()
+    payment = MockPayment(status=PaymentStatus.PREPARED)
+    repository._payments["pay-1"] = payment
+    flow = PaymentFlow(repository, registry=mock_registry)
+
+    result = await flow.handle_callback(
+        payment, confirmation("100.00", "full"), {}
+    )
+
+    assert result is None
+    assert payment.amount_paid == Decimal("100.00")
+    assert repository.save_calls == 1

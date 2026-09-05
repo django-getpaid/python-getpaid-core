@@ -4,18 +4,9 @@ import logging
 from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
-from typing import cast
 
 from getpaid_core._amounts import validate_amount
 from getpaid_core._amounts import validate_payment_amounts
-from getpaid_core.durable import DurablePaymentRepository
-from getpaid_core.durable import ObservationPlan
-from getpaid_core.durable import OperationIntent
-from getpaid_core.durable import OperationOutcome
-from getpaid_core.durable import OperationRecord
-from getpaid_core.durable import OutcomePlan
-from getpaid_core.durable import require_durable_state
-from getpaid_core.durable import supports_durable_state
 from getpaid_core.enums import PaymentEvent
 from getpaid_core.enums import PaymentStatus
 from getpaid_core.exceptions import InvalidTransitionError
@@ -72,12 +63,18 @@ def _charge_log_summary(
     }
 
 
-class PaymentFlow:
-    """Core payment processing orchestrator."""
+class BaseFlow:
+    """What every flow shares: configuration, validators and processors.
+
+    Concrete flows differ in the storage contract they orchestrate --
+    :class:`PaymentFlow` over the released ``PaymentRepository``,
+    ``DurablePaymentFlow`` over the durable one -- not in how they reach
+    a processor or run operation validators.
+    """
 
     def __init__(
         self,
-        repository: PaymentRepository,
+        repository: Any,
         config: dict[str, dict[str, Any]] | None = None,
         validators: list[OperationValidator] | None = None,
         registry: PluginRegistry | None = None,
@@ -86,6 +83,48 @@ class PaymentFlow:
         self.config: dict[str, dict[str, Any]] = config or {}
         self.validators: list[OperationValidator] = validators or []
         self.registry = registry or default_registry
+
+    def get_processor(
+        self,
+        payment: Payment,
+    ) -> Any:
+        """Instantiate the processor for a payment.
+
+        Raises ``BackendNotFoundError`` (a ``KeyError`` subclass) when
+        the payment's backend is not registered.
+        """
+        processor_class = self.registry.get_by_slug(payment.backend)
+        backend_config = self.config.get(payment.backend, {})
+        return processor_class(payment, config=backend_config)
+
+    def _run_operation_validators(
+        self,
+        **context: Any,
+    ) -> dict[str, Any]:
+        return run_validators(context, validators=self.validators)
+
+
+class PaymentFlow(BaseFlow):
+    """Core payment processing orchestrator.
+
+    This is the released 3.x flow: it applies updates to the payment
+    object the caller supplies and saves it. Two independent snapshots of
+    one payment can overwrite each other's committed amounts, so it makes
+    no atomicity guarantee across workers. Integrations that need one
+    move to ``getpaid_core.durable.DurablePaymentFlow`` over a repository
+    implementing the durable contract; see the durable storage contract
+    documentation for the upgrade boundary.
+    """
+
+    def __init__(
+        self,
+        repository: PaymentRepository,
+        config: dict[str, dict[str, Any]] | None = None,
+        validators: list[OperationValidator] | None = None,
+        registry: PluginRegistry | None = None,
+    ) -> None:
+        super().__init__(repository, config, validators, registry)
+        self.repository: PaymentRepository = repository
 
     async def create_payment(
         self,
@@ -151,17 +190,8 @@ class PaymentFlow:
         data: dict[str, Any],
         headers: dict[str, str],
         **kwargs: Any,
-    ) -> ObservationPlan | None:
-        """Handle an incoming PUSH callback from the gateway.
-
-        With a durable repository the normalized observation is applied
-        to the payment's *current* stored state and the committed plan is
-        returned; ``payment`` serves only as the identity and processor
-        source, and its financial fields are never written back. With a
-        repository that predates the durable contract the released 3.x
-        behaviour is kept -- the caller's object is updated and saved,
-        and ``None`` is returned.
-        """
+    ) -> None:
+        """Handle an incoming PUSH callback from the gateway."""
         context = self._run_operation_validators(
             operation="callback",
             payment=payment,
@@ -176,25 +206,14 @@ class PaymentFlow:
         update = await processor.handle_callback(
             context["data"], context["headers"], **context["kwargs"]
         )
-        durable = self._durable_repository()
-        if durable is not None:
-            return await durable.apply_observation(payment.id, update)
         apply_payment_update(payment, update)
         await self.repository.save(payment)
-        return None
 
     async def fetch_and_update_status(
         self,
         payment: Payment,
-    ) -> ObservationPlan | Payment:
-        """PULL flow: fetch status from gateway and update.
-
-        Polling shares the callback's atomic boundary: with a durable
-        repository the fetched observation is applied to current stored
-        state and the committed plan is returned. With a repository that
-        predates the durable contract the released 3.x behaviour is kept
-        and the caller's payment object is returned.
-        """
+    ) -> Payment:
+        """PULL flow: fetch status from gateway and update."""
         context = self._run_operation_validators(
             operation="fetch_status",
             payment=payment,
@@ -202,56 +221,11 @@ class PaymentFlow:
         )
         processor = self.get_processor(payment)
         update = await processor.fetch_payment_status(**context["kwargs"])
-        durable = self._durable_repository()
-        if durable is not None:
-            return await durable.apply_observation(payment.id, update)
         if update is None:
             return payment
         apply_payment_update(payment, update)
         await self.repository.save(payment)
         return payment
-
-    async def reserve_operation(
-        self,
-        payment: Payment,
-        intent: OperationIntent,
-    ) -> OperationRecord:
-        """Reserve an operation intent before submitting it to a provider.
-
-        The reservation commits against the payment's current durable
-        facts, so the amount an omitted request resolves to is frozen
-        before any provider call and reused by a same-ID retry. A
-        repository that cannot commit atomically is refused here, which
-        is *before* the provider sees a financial command.
-
-        Reserving is not provider acceptance and not settlement: the
-        provider call happens after this returns, outside any transaction
-        this reservation opened.
-        """
-        repository = require_durable_state(
-            self.repository, operation=str(intent.operation_type)
-        )
-        return await repository.reserve_operation(payment.id, intent)
-
-    async def record_operation_outcome(
-        self,
-        payment: Payment,
-        operation_id: str,
-        outcome: OperationOutcome,
-    ) -> OutcomePlan:
-        """Record what a reserved operation turned out to do.
-
-        The operation record and the financial facts it settles commit
-        together. A nonterminal outcome -- ``UNKNOWN`` included -- moves
-        no money and leaves the operation discoverable as unresolved
-        work; it is never evidence that resubmission is safe.
-        """
-        repository = require_durable_state(
-            self.repository, operation="record_operation_outcome"
-        )
-        return await repository.record_operation_outcome(
-            payment.id, operation_id, outcome
-        )
 
     async def charge(
         self,
@@ -474,31 +448,6 @@ class PaymentFlow:
             await self.repository.save(payment)
         return success
 
-    def _durable_repository(self) -> DurablePaymentRepository | None:
-        """The repository, when it declares the durable-state contract.
-
-        Observations route through the durable boundary as soon as the
-        adapter can commit them atomically; an adapter that cannot is
-        left on the released 3.x behaviour, which makes no atomicity
-        claim, until it is upgraded.
-        """
-        if supports_durable_state(self.repository):
-            return cast("DurablePaymentRepository", self.repository)
-        return None
-
-    def get_processor(
-        self,
-        payment: Payment,
-    ) -> Any:
-        """Instantiate the processor for a payment.
-
-        Raises ``BackendNotFoundError`` (a ``KeyError`` subclass) when
-        the payment's backend is not registered.
-        """
-        processor_class = self.registry.get_by_slug(payment.backend)
-        backend_config = self.config.get(payment.backend, {})
-        return processor_class(payment, config=backend_config)
-
     @staticmethod
     def _validate_provider_amount(
         payment: Payment,
@@ -538,9 +487,3 @@ class PaymentFlow:
                 context=context,
                 charge_result=charge_result,
             ) from exc
-
-    def _run_operation_validators(
-        self,
-        **context: Any,
-    ) -> dict[str, Any]:
-        return run_validators(context, validators=self.validators)

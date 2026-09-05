@@ -62,11 +62,14 @@ def prepared_facts() -> PaymentFacts:
 def test_the_suite_has_checks_for_every_required_race():
     names = {name for name, _ in CONFORMANCE_CHECKS}
 
-    assert "stale_capture_cannot_regress_funds" in names
-    assert "capture_and_refund_race_preserves_both" in names
-    assert "duplicate_events_are_idempotent" in names
-    assert "distinct_events_all_survive" in names
-    assert "unresolved_operations_are_discoverable" in names
+    assert names == {
+        "stale_capture_cannot_regress_funds",
+        "capture_and_refund_race_preserves_both",
+        "duplicate_events_are_idempotent",
+        "distinct_events_all_survive",
+        "unresolved_operations_are_discoverable",
+        "outstanding_operation_blocks_unrelated_commands",
+    }
 
 
 async def test_reference_repository_passes_the_conformance_suite():
@@ -110,3 +113,26 @@ async def test_independent_workers_cannot_erase_committed_funds():
         "pay-1", capture("40.00", "partial")
     )
     assert replayed.applied is False
+
+
+async def test_conflicting_event_identity_is_durably_flagged():
+    """Reconciliation is discoverable from stored state, not a return value."""
+    repository = InMemoryDurableRepository([prepared_facts()])
+    applied = PaymentUpdate(
+        payment_event=PaymentEvent.PAYMENT_CAPTURED,
+        paid_amount=Decimal("40.00"),
+        provider_event_id="e-1",
+    )
+    conflicting = PaymentUpdate(
+        payment_event=PaymentEvent.PAYMENT_CAPTURED,
+        paid_amount=Decimal("100.00"),
+        provider_event_id="e-1",
+    )
+
+    await repository.apply_observation("pay-1", applied)
+    plan = await repository.apply_observation("pay-1", conflicting)
+
+    assert plan.applied is False
+    facts = await repository.get_payment_facts("pay-1")
+    assert facts.reconciliation_required is True
+    assert facts.captured_funds == Decimal("40.00")

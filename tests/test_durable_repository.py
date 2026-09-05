@@ -1,9 +1,11 @@
 """The semantic repository contract and its capability guard."""
 
+import inspect
 from collections.abc import Sequence
 
 import pytest
 
+from getpaid_core.durable import MANDATORY_OPERATIONS
 from getpaid_core.durable import DurablePaymentRepository
 from getpaid_core.durable import ObservationPlan
 from getpaid_core.durable import OperationIntent
@@ -49,6 +51,19 @@ class ConformingRepository:
 
     async def list_unresolved_operations(self) -> Sequence[OperationRecord]:
         raise NotImplementedError
+
+
+def test_mandatory_operations_match_the_protocol():
+    """The capability probe must not drift from the protocol it checks."""
+    declared = {
+        name
+        for name, member in inspect.getmembers(
+            DurablePaymentRepository, inspect.isfunction
+        )
+        if not name.startswith("_")
+    }
+
+    assert set(MANDATORY_OPERATIONS) == declared
 
 
 def test_legacy_repository_does_not_support_durable_state():
