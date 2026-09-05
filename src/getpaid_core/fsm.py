@@ -37,7 +37,11 @@ def _ensure_provider_data(payment: Payment) -> dict:
     return provider_data
 
 
-def _coerce_payment_status(payment: Payment) -> PaymentStatus:
+def coerce_payment_status(payment: Payment) -> PaymentStatus:
+    """Return the payment status as a ``PaymentStatus``.
+
+    An unset status (``None`` or empty) reads as ``NEW``.
+    """
     status = payment.status or PaymentStatus.NEW
     return PaymentStatus(status)
 
@@ -186,7 +190,7 @@ def _apply_payment_event(payment: Payment, update: PaymentUpdate) -> None:
     if event is None:
         return
 
-    status = _coerce_payment_status(payment)
+    status = coerce_payment_status(payment)
 
     if event is PaymentEvent.PREPARED:
         if status is PaymentStatus.NEW:

@@ -10,4 +10,8 @@
 /src/*.egg-info/
 __pycache__/
 /.idea/
+/.worktrees/
+/.pi/factory.json
+/docs/agents/issue-tracker.md
+/.unforget/
 
