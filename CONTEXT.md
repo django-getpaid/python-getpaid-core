@@ -94,3 +94,74 @@ The Order a renewal payment belongs to — one per billing period, created by
 the application (merchant-managed) or materialized by the adapter when a
 provider-initiated payment arrives (provider-managed). Keeps the "every
 payment has an order" invariant universal.
+
+### Operation intent
+
+One deliberate instruction to a provider for a payment, distinct from attempts
+to submit it. Retrying an intent is not a new capture or refund.
+
+### Operation ID
+
+The application-assigned identity of an operation intent within a payment,
+unchanged across retries and restarts. A separate deliberate partial capture or
+refund has a different operation ID even when its amount is identical.
+
+### Operation reservation
+
+The durable acceptance of an intent against the payment's current financial
+state, including its concrete amount and exclusive right to proceed. It is not
+provider acceptance or financial settlement.
+
+### Provider acceptance
+
+The provider's acknowledgement that it accepted an operation for processing.
+For a capture or refund, acceptance does not establish that funds have settled.
+
+### Unknown operation outcome
+
+An operation whose provider effect cannot yet be established from available
+evidence. Unknown does not mean rejected, cancelled, or safe to submit again.
+
+### Reconciliation
+
+Establishing and recording a payment operation's outcome and financial effects
+from trustworthy provider evidence or an auditable operator resolution. It is
+not a fresh financial command or an automatic compensating refund.
+
+### Captured funds
+
+The cumulative amount collected through a payment, before refunds. Refunding
+funds does not reduce the amount historically captured.
+
+### Refunded funds
+
+The cumulative captured amount confirmed returned through refunds. Releasing
+uncaptured authorization does not contribute to refunded funds.
+
+### Remaining authorization
+
+The uncaptured portion of a provider hold still available for supported capture
+or release. It is distinct from captured funds and from money available to refund.
+
+### Authorization release
+
+Removal of a remaining uncaptured hold. It does not return captured funds and
+must not be described as a refund.
+
+### Cumulative financial observation
+
+A report of a payment's total captured or refunded amount, rather than an
+instruction to add that amount again. A repeated or older observation does not
+establish newly moved money.
+
+### Provider event identity
+
+The identity of one provider observation within its provider/payment context,
+used to recognize repeated delivery. It is distinct from the operation ID that
+identifies the merchant's financial intent.
+
+### Refund cancellation
+
+An instruction targeting a specific pending refund to stop its unexecuted
+portion, where the provider supports it. It cannot undo refunded funds already
+confirmed returned.

@@ -9,6 +9,7 @@
 getting-started
 concepts
 reference
+Next-major durable-state decision <adr/0001-durable-money-operations>
 changelog
 contributing
 Code of Conduct <codeofconduct>
