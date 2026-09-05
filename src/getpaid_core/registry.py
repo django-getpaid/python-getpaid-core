@@ -69,16 +69,28 @@ class PluginRegistry:
             self._backends.pop(slug, None)
 
     def get_for_currency(self, currency: str) -> list[type[BaseProcessor]]:
-        """Return all backends supporting the given currency."""
+        """Return all backends supporting the given currency.
+
+        The backends are snapshotted under the registry lock and
+        filtered outside it, so a ``register``/``unregister`` landing
+        while the query runs is not observed by that query: an
+        in-progress query returns its pre-mutation snapshot. Keeping the
+        filtering outside the lock also keeps backend-owned
+        ``accepted_currencies`` behaviour from blocking registrations.
+        """
         self._ensure_discovered()
         return [
             backend
-            for backend in self._backends.values()
+            for backend in self._snapshot()
             if currency in backend.accepted_currencies
         ]
 
     def get_choices(self, currency: str) -> list[tuple[str, str]]:
-        """Return (slug, display_name) pairs for a currency."""
+        """Return (slug, display_name) pairs for a currency.
+
+        Inherits the pre-mutation snapshot semantics of
+        ``get_for_currency``.
+        """
         return [
             (backend.slug, backend.display_name)
             for backend in self.get_for_currency(currency)
@@ -101,12 +113,21 @@ class PluginRegistry:
             ) from None
 
     def get_all_currencies(self) -> set[str]:
-        """Return all currencies supported by all backends."""
+        """Return all currencies supported by all backends.
+
+        Uses the same pre-mutation snapshot semantics as
+        ``get_for_currency``.
+        """
         self._ensure_discovered()
         currencies: set[str] = set()
-        for backend in self._backends.values():
+        for backend in self._snapshot():
             currencies.update(backend.accepted_currencies)
         return currencies
+
+    def _snapshot(self) -> list[type[BaseProcessor]]:
+        """Return the registered backends as captured under the lock."""
+        with self._lock:
+            return list(self._backends.values())
 
     def _ensure_discovered(self) -> None:
         if not self._discovered:

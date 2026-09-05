@@ -272,3 +272,167 @@ class TestThreadSafety:
             for f in futures:
                 result = f.result()
                 assert result is PLNProcessor
+
+
+class PausingCurrencies(list):
+    """A plugin-owned currency sequence that blocks the reading thread.
+
+    It only controls scheduling so a query can be caught mid-iteration;
+    it never touches the registry itself.
+    """
+
+    def __init__(
+        self,
+        values: Sequence[str],
+        entered: threading.Event,
+        resume: threading.Event,
+    ) -> None:
+        super().__init__(values)
+        self.entered = entered
+        self.resume = resume
+
+    def _pause(self) -> None:
+        self.entered.set()
+        if not self.resume.wait(timeout=5):
+            raise TimeoutError("The writer never released the reader.")
+
+    def __contains__(self, value: object) -> bool:
+        self._pause()
+        return super().__contains__(value)
+
+    def __iter__(self):
+        self._pause()
+        return super().__iter__()
+
+
+class TestQueryWriteOverlap:
+    """Queries iterate a snapshot taken under the registry lock, so a
+    concurrent register/unregister can neither break the iteration nor
+    change the result of a query already in progress."""
+
+    @staticmethod
+    def _pausing_registry() -> tuple[
+        PluginRegistry, threading.Event, threading.Event
+    ]:
+        entered = threading.Event()
+        resume = threading.Event()
+
+        class PausingProcessor(PLNProcessor):
+            slug = "pausing-pay"
+            display_name = "Pausing Payments"
+            accepted_currencies = PausingCurrencies(
+                ["PLN"], entered, resume
+            )
+
+        registry = PluginRegistry()
+        registry._discovered = True
+        registry.register(PausingProcessor)
+        registry.register(EURProcessor)
+        return registry, entered, resume
+
+    @staticmethod
+    def _run_overlapped(query, mutate, entered, resume):
+        """Start ``query``, run ``mutate`` while it is paused mid-query,
+        then let the query finish and return its result."""
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            reader = pool.submit(query)
+            try:
+                assert entered.wait(timeout=5), "query never paused"
+                mutate()
+            finally:
+                resume.set()
+            return reader.result(timeout=5)
+
+    def test_get_for_currency_survives_concurrent_unregister(self) -> None:
+        registry, entered, resume = self._pausing_registry()
+        registry.register(
+            type("OtherPLN", (PLNProcessor,), {"slug": "other-pln"})
+        )
+
+        backends = self._run_overlapped(
+            lambda: registry.get_for_currency("PLN"),
+            lambda: registry.unregister("other-pln"),
+            entered,
+            resume,
+        )
+
+        slugs = [backend.slug for backend in backends]
+        assert slugs == ["pausing-pay", "other-pln"]
+
+    def test_get_for_currency_survives_concurrent_register(self) -> None:
+        registry, entered, resume = self._pausing_registry()
+        late = type("LatePLN", (PLNProcessor,), {"slug": "late-pln"})
+
+        backends = self._run_overlapped(
+            lambda: registry.get_for_currency("PLN"),
+            lambda: registry.register(late),
+            entered,
+            resume,
+        )
+
+        assert [backend.slug for backend in backends] == ["pausing-pay"]
+        assert registry.get_by_slug("late-pln") is late
+
+    def test_get_choices_survives_concurrent_unregister(self) -> None:
+        registry, entered, resume = self._pausing_registry()
+        registry.register(
+            type(
+                "OtherPLN",
+                (PLNProcessor,),
+                {"slug": "other-pln", "display_name": "Other PLN"},
+            )
+        )
+
+        choices = self._run_overlapped(
+            lambda: registry.get_choices("PLN"),
+            lambda: registry.unregister("other-pln"),
+            entered,
+            resume,
+        )
+
+        assert choices == [
+            ("pausing-pay", "Pausing Payments"),
+            ("other-pln", "Other PLN"),
+        ]
+
+    def test_get_choices_survives_concurrent_register(self) -> None:
+        registry, entered, resume = self._pausing_registry()
+        late = type("LatePLN", (PLNProcessor,), {"slug": "late-pln"})
+
+        choices = self._run_overlapped(
+            lambda: registry.get_choices("PLN"),
+            lambda: registry.register(late),
+            entered,
+            resume,
+        )
+
+        assert choices == [("pausing-pay", "Pausing Payments")]
+
+    def test_get_all_currencies_survives_concurrent_unregister(self) -> None:
+        registry, entered, resume = self._pausing_registry()
+
+        currencies = self._run_overlapped(
+            registry.get_all_currencies,
+            lambda: registry.unregister("eur-pay"),
+            entered,
+            resume,
+        )
+
+        assert currencies == {"PLN", "EUR"}
+
+    def test_get_all_currencies_survives_concurrent_register(self) -> None:
+        registry, entered, resume = self._pausing_registry()
+        late = type(
+            "LateUSD",
+            (PLNProcessor,),
+            {"slug": "late-usd", "accepted_currencies": ("USD",)},
+        )
+
+        currencies = self._run_overlapped(
+            registry.get_all_currencies,
+            lambda: registry.register(late),
+            entered,
+            resume,
+        )
+
+        assert currencies == {"PLN", "EUR"}
