@@ -282,6 +282,21 @@ class PaymentFlow:
                 f"Cannot start refund for payment in {payment.status!r} "
                 "status. Payment must be PAID, PARTIAL, or REFUND_STARTED."
             )
+        validate_amount(payment.amount_paid, "amount_paid")
+        validate_amount(
+            payment.amount_refunded,
+            "amount_refunded",
+            maximum=payment.amount_paid,
+            maximum_name="amount_paid",
+        )
+        available = payment.amount_paid - payment.amount_refunded
+        amount = context["kwargs"].get("amount")
+        if amount is None:
+            amount = available
+        validate_amount(
+            amount, "Refund amount", allow_zero=False, maximum=available
+        )
+        context["kwargs"]["amount"] = amount
         processor = self.get_processor(payment)
         result = await processor.start_refund(**context["kwargs"])
         apply_payment_update(
