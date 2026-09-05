@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
+from getpaid_core._amounts import validate_amount
+from getpaid_core._amounts import validate_payment_amounts
 from getpaid_core.enums import FraudEvent
 from getpaid_core.enums import FraudStatus
 from getpaid_core.enums import PaymentEvent
@@ -97,13 +99,34 @@ def _merge_provider_data(payment: Payment, provider_data: dict) -> None:
     _ensure_provider_data(payment).update(provider_data)
 
 
-def _set_paid_amount(payment: Payment, paid_amount: Decimal) -> None:
-    """Set paid amount. Raises if paid_amount exceeds amount_required."""
-    if paid_amount > payment.amount_required:
-        raise InvalidTransitionError(
-            f"Paid amount {paid_amount} exceeds amount_required "
-            f"{payment.amount_required}."
+def _validate_update_amounts(payment: Payment, update: PaymentUpdate) -> None:
+    """Check every supplied amount, even on metadata-only updates."""
+    validate_payment_amounts(payment)
+    if update.paid_amount is not None:
+        validate_amount(
+            update.paid_amount,
+            "Paid amount",
+            maximum=payment.amount_required,
+            maximum_name="amount_required",
         )
+    if update.refunded_amount is not None:
+        validate_amount(
+            update.refunded_amount,
+            "Refunded amount",
+            maximum=payment.amount_paid,
+            maximum_name="amount_paid",
+        )
+    if update.locked_amount is not None:
+        validate_amount(
+            update.locked_amount,
+            "Locked amount",
+            allow_zero=False,
+            maximum=payment.amount_required - payment.amount_paid,
+            maximum_name="uncaptured amount_required",
+        )
+
+
+def _set_paid_amount(payment: Payment, paid_amount: Decimal) -> None:
     previous_paid = payment.amount_paid
     next_paid = max(previous_paid, paid_amount)
     increment = next_paid - previous_paid
@@ -114,22 +137,11 @@ def _set_paid_amount(payment: Payment, paid_amount: Decimal) -> None:
         )
 
 
-def _set_refunded_amount(
-    payment: Payment, refunded_amount: Decimal | None
-) -> None:
-    if refunded_amount is None:
-        refunded_amount = payment.amount_paid
-    if refunded_amount > payment.amount_paid:
-        raise InvalidTransitionError(
-            f"Refunded amount {refunded_amount} exceeds amount_paid "
-            f"{payment.amount_paid}."
-        )
+def _set_refunded_amount(payment: Payment, refunded_amount: Decimal) -> None:
     payment.amount_refunded = max(payment.amount_refunded, refunded_amount)
 
 
-def _set_locked_amount(payment: Payment, locked_amount: Decimal | None) -> None:
-    if locked_amount is None:
-        locked_amount = payment.amount_required
+def _set_locked_amount(payment: Payment, locked_amount: Decimal) -> None:
     payment.amount_locked = max(payment.amount_locked, locked_amount)
 
 
@@ -359,6 +371,7 @@ def apply_payment_update(
         if not _record_provider_event(payment, update.provider_event_id):
             return payment
 
+        _validate_update_amounts(payment, update)
         if update.external_id is not None:
             payment.external_id = update.external_id
         if update.fraud_message is not None:
