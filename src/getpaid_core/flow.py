@@ -27,6 +27,39 @@ logger = logging.getLogger(__name__)
 OperationValidator = Callable[[dict[str, Any]], dict[str, Any]]
 
 
+def _charge_log_summary(
+    payment: Payment,
+    result: ChargeResult,
+) -> dict[str, Any]:
+    """Build an allowlisted, log-safe summary of a charge outcome.
+
+    Only core-owned, typed fields are included: payment and operation
+    identity, the provider correlation handle, the outcome flags and the
+    amounts. ``ChargeResult.provider_data`` is plugin-defined
+    ``dict[str, Any]`` -- it may carry stored-credential tokens, buyer
+    details or raw provider responses -- so no key or value of it is ever
+    interpolated into a log record; only the number of entries is
+    reported, as a hint that provider metadata exists. Core has no typed
+    provider error field, so no provider error code is logged either.
+
+    Full recovery evidence stays available to the caller through
+    ``ReconciliationRequiredError.charge_result``, which is the
+    controlled channel for sensitive provider metadata.
+    """
+    return {
+        "payment_id": payment.id,
+        "operation": "charge",
+        "backend": payment.backend,
+        "external_id": payment.external_id,
+        "currency": payment.currency,
+        "success": result.success,
+        "async_call": result.async_call,
+        "amount_charged": result.amount_charged,
+        "amount_required": payment.amount_required,
+        "provider_data_entries": len(result.provider_data),
+    }
+
+
 class PaymentFlow:
     """Core payment processing orchestrator."""
 
@@ -165,9 +198,8 @@ class PaymentFlow:
         result = await processor.charge(**context["kwargs"])
         if not result.success:
             logger.warning(
-                "Gateway declined charge for payment %s: %r",
-                payment.id,
-                result,
+                "Gateway declined charge: %s",
+                _charge_log_summary(payment, result),
             )
             apply_payment_update(
                 payment,
@@ -198,11 +230,10 @@ class PaymentFlow:
             # locally -- surface a dedicated error for reconciliation
             # instead of the bare local failure.
             logger.critical(
-                "Gateway charge succeeded but local update failed for "
-                "payment %s; gateway result: %r. "
-                "Manual reconciliation required.",
-                payment.id,
-                result,
+                "Gateway charge succeeded but local update failed; "
+                "manual reconciliation required (full provider result on "
+                "ReconciliationRequiredError.charge_result): %s",
+                _charge_log_summary(payment, result),
                 exc_info=True,
             )
             raise ReconciliationRequiredError(

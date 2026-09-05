@@ -49,6 +49,10 @@ class ReconciliationRequiredError(GetPaidException):
     Money moved at the payment provider without a corresponding local
     record. The gateway result is carried in :attr:`charge_result` (and
     in ``context``) so operators can reconcile the payment manually.
+
+    That result keeps the provider metadata core deliberately leaves out
+    of its logs. Treat it as sensitive recovery evidence and route it to
+    a controlled channel rather than to a general-purpose logger.
     """
 
     def __init__(
