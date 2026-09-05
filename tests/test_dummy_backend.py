@@ -9,9 +9,21 @@ from getpaid_core.backends.dummy import DummyProcessor
 from getpaid_core.enums import BackendMethod
 from getpaid_core.enums import PaymentEvent
 from getpaid_core.enums import PaymentStatus
+from getpaid_core.flow import PaymentFlow
 from getpaid_core.processor import BaseProcessor
 from getpaid_core.protocols import Payment as PaymentProtocol
+from getpaid_core.registry import PluginRegistry
 from tests.conftest import MockPayment
+from tests.conftest import MockRepository
+
+
+@pytest.fixture
+def dummy_flow() -> PaymentFlow:
+    """A PaymentFlow serving DummyProcessor alone."""
+    registry = PluginRegistry()
+    registry._discovered = True
+    registry.register(DummyProcessor)
+    return PaymentFlow(repository=MockRepository(), registry=registry)
 
 
 class TestDummyProcessorAttributes:
@@ -141,3 +153,172 @@ class TestDummyRefunds:
         result = await processor.cancel_refund()
 
         assert result is True
+
+
+class TestDummyFallbackEventIds:
+    """Callbacks that omit ``event_id`` must still advance cumulative
+    progress, while an exact replay stays a harmless no-op."""
+
+    @pytest.mark.asyncio
+    async def test_cumulative_capture_without_explicit_ids(
+        self, dummy_flow: PaymentFlow
+    ) -> None:
+        payment = MockPayment(backend="dummy", status=PaymentStatus.PREPARED)
+
+        for paid_amount in ("40.00", "100.00"):
+            await dummy_flow.handle_callback(
+                cast("PaymentProtocol", payment),
+                {"event": "payment_confirmed", "paid_amount": paid_amount},
+                {},
+            )
+
+        assert payment.amount_paid == Decimal("100.00")
+        assert payment.status == PaymentStatus.PAID
+
+    @pytest.mark.asyncio
+    async def test_replayed_capture_is_recorded_once(
+        self, dummy_flow: PaymentFlow
+    ) -> None:
+        payment = MockPayment(backend="dummy", status=PaymentStatus.PREPARED)
+        callback = {"event": "payment_confirmed", "paid_amount": "40.00"}
+
+        await dummy_flow.handle_callback(
+            cast("PaymentProtocol", payment), dict(callback), {}
+        )
+        await dummy_flow.handle_callback(
+            cast("PaymentProtocol", payment), dict(callback), {}
+        )
+
+        assert payment.amount_paid == Decimal("40.00")
+        assert payment.status == PaymentStatus.PARTIAL
+        assert payment.provider_data["applied_event_ids"] == [
+            "payment:pay-1:40"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_staged_refunds_without_explicit_ids(
+        self, dummy_flow: PaymentFlow
+    ) -> None:
+        payment = MockPayment(
+            backend="dummy",
+            status=PaymentStatus.PAID,
+            amount_paid=Decimal("100.00"),
+        )
+
+        for refunded_amount in ("40.00", "100.00"):
+            await dummy_flow.handle_callback(
+                cast("PaymentProtocol", payment),
+                {
+                    "event": "refund_confirmed",
+                    "refunded_amount": refunded_amount,
+                },
+                {},
+            )
+
+        assert payment.amount_refunded == Decimal("100.00")
+        assert payment.status == PaymentStatus.REFUNDED
+
+    @pytest.mark.asyncio
+    async def test_replayed_refund_is_recorded_once(
+        self, dummy_flow: PaymentFlow
+    ) -> None:
+        payment = MockPayment(
+            backend="dummy",
+            status=PaymentStatus.PAID,
+            amount_paid=Decimal("100.00"),
+        )
+        callback = {"event": "refund_confirmed", "refunded_amount": "40.00"}
+
+        await dummy_flow.handle_callback(
+            cast("PaymentProtocol", payment), dict(callback), {}
+        )
+        await dummy_flow.handle_callback(
+            cast("PaymentProtocol", payment), dict(callback), {}
+        )
+
+        assert payment.amount_refunded == Decimal("40.00")
+        assert payment.status == PaymentStatus.PARTIAL
+        assert payment.provider_data["applied_event_ids"] == [
+            "refund:pay-1:40"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_replayed_capture_ignores_amount_notation(
+        self, dummy_flow: PaymentFlow
+    ) -> None:
+        """Decimal-equal totals are the same event, however written."""
+        payment = MockPayment(backend="dummy", status=PaymentStatus.PREPARED)
+
+        for paid_amount in ("40", "40.00", "40.000"):
+            await dummy_flow.handle_callback(
+                cast("PaymentProtocol", payment),
+                {"event": "payment_confirmed", "paid_amount": paid_amount},
+                {},
+            )
+
+        assert payment.provider_data["applied_event_ids"] == [
+            "payment:pay-1:40"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_capture_and_refund_of_one_total_are_distinct_events(
+        self, dummy_flow: PaymentFlow
+    ) -> None:
+        """The fallback is scoped per family, not per amount alone."""
+        payment = MockPayment(backend="dummy", status=PaymentStatus.PREPARED)
+
+        await dummy_flow.handle_callback(
+            cast("PaymentProtocol", payment),
+            {"event": "payment_confirmed", "paid_amount": "100.00"},
+            {},
+        )
+        await dummy_flow.handle_callback(
+            cast("PaymentProtocol", payment),
+            {"event": "refund_confirmed", "refunded_amount": "100.00"},
+            {},
+        )
+
+        assert payment.amount_paid == Decimal("100.00")
+        assert payment.amount_refunded == Decimal("100.00")
+        assert payment.status == PaymentStatus.REFUNDED
+
+    @pytest.mark.asyncio
+    async def test_explicit_event_id_overrides_the_fallback(
+        self, dummy_flow: PaymentFlow
+    ) -> None:
+        payment = MockPayment(backend="dummy", status=PaymentStatus.PREPARED)
+
+        await dummy_flow.handle_callback(
+            cast("PaymentProtocol", payment),
+            {
+                "event": "payment_confirmed",
+                "paid_amount": "40.00",
+                "event_id": "evt-1",
+            },
+            {},
+        )
+
+        assert payment.provider_data["applied_event_ids"] == ["evt-1"]
+
+    @pytest.mark.asyncio
+    async def test_blank_event_id_falls_back_instead_of_colliding(
+        self, dummy_flow: PaymentFlow
+    ) -> None:
+        """A null or empty ``event_id`` is an omitted one, not the
+        literal string it would otherwise stringify into."""
+        payment = MockPayment(backend="dummy", status=PaymentStatus.PREPARED)
+
+        for event_id in (None, ""):
+            await dummy_flow.handle_callback(
+                cast("PaymentProtocol", payment),
+                {
+                    "event": "payment_confirmed",
+                    "paid_amount": "40.00",
+                    "event_id": event_id,
+                },
+                {},
+            )
+
+        assert payment.provider_data["applied_event_ids"] == [
+            "payment:pay-1:40"
+        ]
