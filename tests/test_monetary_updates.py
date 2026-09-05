@@ -170,3 +170,48 @@ def test_lock_is_bounded_by_uncaptured_total():
         PaymentUpdate(payment_event="locked", locked_amount=Decimal("60")),
     )
     assert payment.amount_locked == Decimal("60")
+
+
+def test_lock_replay_after_capture_is_still_idempotent():
+    payment = MockPayment(status="prepared")
+    lock = PaymentUpdate(
+        payment_event="locked",
+        locked_amount=Decimal("100"),
+        provider_event_id="lock",
+    )
+    apply_payment_update(payment, lock)
+    apply_payment_update(
+        payment,
+        PaymentUpdate(
+            payment_event="payment_captured", paid_amount=Decimal("100")
+        ),
+    )
+
+    apply_payment_update(payment, lock)
+
+    assert payment.status == "paid"
+    assert payment.amount_locked == Decimal("0")
+    assert payment.provider_data["applied_event_ids"] == ["lock"]
+
+
+@pytest.mark.parametrize(
+    "balances",
+    [
+        {"amount_paid": Decimal("101")},
+        {"amount_refunded": Decimal("1")},
+        {"amount_locked": Decimal("101")},
+        {"amount_paid": Decimal("40"), "amount_locked": Decimal("61")},
+    ],
+)
+def test_invalid_stored_bounds_reject_updates_without_mutation(balances):
+    payment = MockPayment(status="prepared", **balances)
+
+    with pytest.raises(InvalidTransitionError):
+        apply_payment_update(
+            payment,
+            PaymentUpdate(
+                provider_event_id="invalid", provider_data={"changed": True}
+            ),
+        )
+
+    assert payment.provider_data == {}

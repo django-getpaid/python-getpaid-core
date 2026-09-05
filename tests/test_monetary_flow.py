@@ -261,3 +261,62 @@ async def test_declined_charge_cannot_report_captured_funds(
 
     assert len(calls) == 1
     assert payment.status == "pre-auth"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "operation", ["charge", "start_refund", "release_lock"]
+)
+@pytest.mark.parametrize(
+    "field",
+    ["amount_required", "amount_paid", "amount_locked", "amount_refunded"],
+)
+@pytest.mark.parametrize(
+    "amount",
+    [
+        Decimal("-1"),
+        Decimal("NaN"),
+        Decimal("sNaN"),
+        Decimal("Infinity"),
+        "100",
+    ],
+)
+async def test_invalid_stored_balance_never_reaches_processor(
+    recording_flow, mock_repo, operation, field, amount
+):
+    flow, calls = recording_flow
+    payment = MockPayment(
+        status="paid" if operation == "start_refund" else "pre-auth",
+        amount_paid=Decimal("100")
+        if operation == "start_refund"
+        else Decimal("0"),
+        amount_locked=Decimal("0")
+        if operation == "start_refund"
+        else Decimal("100"),
+    )
+    setattr(payment, field, amount)
+
+    with pytest.raises(InvalidTransitionError):
+        if operation == "release_lock":
+            await flow.release_lock(payment)
+        else:
+            await getattr(flow, operation)(payment, Decimal("10"))
+
+    assert calls == []
+    assert mock_repo.save_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_partial_release_result_does_not_clear_full_authorization(
+    recording_flow, provider_results
+):
+    flow, calls = recording_flow
+    payment = MockPayment(status="pre-auth", amount_locked=Decimal("100"))
+    provider_results["release_lock"] = Decimal("40")
+
+    with pytest.raises(ReconciliationRequiredError):
+        await flow.release_lock(payment)
+
+    assert len(calls) == 1
+    assert payment.status == "pre-auth"
+    assert payment.amount_locked == Decimal("100")

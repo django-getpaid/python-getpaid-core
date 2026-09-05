@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import Any
 
 from getpaid_core._amounts import validate_amount
+from getpaid_core._amounts import validate_payment_amounts
 from getpaid_core.enums import PaymentEvent
 from getpaid_core.enums import PaymentStatus
 from getpaid_core.exceptions import InvalidTransitionError
@@ -162,14 +163,7 @@ class PaymentFlow:
                 f"Cannot charge payment in {payment.status!r} status. "
                 "Payment must be PRE_AUTH or IN_CHARGE."
             )
-        validate_amount(payment.amount_required, "amount_required")
-        validate_amount(
-            payment.amount_paid,
-            "amount_paid",
-            maximum=payment.amount_required,
-            maximum_name="amount_required",
-        )
-        validate_amount(payment.amount_locked, "amount_locked")
+        validate_payment_amounts(payment)
         available = min(
             payment.amount_locked, payment.amount_required - payment.amount_paid
         )
@@ -260,6 +254,7 @@ class PaymentFlow:
                 f"Cannot release lock for payment in {payment.status!r} "
                 "status. Payment must be PRE_AUTH."
             )
+        validate_payment_amounts(payment)
         validate_amount(
             payment.amount_locked, "amount_locked", allow_zero=False
         )
@@ -297,13 +292,7 @@ class PaymentFlow:
                 f"Cannot start refund for payment in {payment.status!r} "
                 "status. Payment must be PAID, PARTIAL, or REFUND_STARTED."
             )
-        validate_amount(payment.amount_paid, "amount_paid")
-        validate_amount(
-            payment.amount_refunded,
-            "amount_refunded",
-            maximum=payment.amount_paid,
-            maximum_name="amount_paid",
-        )
+        validate_payment_amounts(payment)
         available = payment.amount_paid - payment.amount_refunded
         amount = context["kwargs"].get("amount")
         if amount is None:
@@ -383,6 +372,10 @@ class PaymentFlow:
                 maximum=maximum,
                 maximum_name="requested amount",
             )
+            if operation == "release_lock" and amount != maximum:
+                raise InvalidTransitionError(
+                    "Lock release result must cover the full authorization."
+                )
         except InvalidTransitionError as exc:
             # The command already reached the provider. Do not treat an
             # invalid result as a safely rejected request or mutate state.

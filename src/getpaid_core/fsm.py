@@ -7,6 +7,7 @@ from decimal import Decimal
 from typing import Any
 
 from getpaid_core._amounts import validate_amount
+from getpaid_core._amounts import validate_payment_amounts
 from getpaid_core.enums import FraudEvent
 from getpaid_core.enums import FraudStatus
 from getpaid_core.enums import PaymentEvent
@@ -96,10 +97,7 @@ def _merge_provider_data(payment: Payment, provider_data: dict) -> None:
 
 def _validate_update_amounts(payment: Payment, update: PaymentUpdate) -> None:
     """Check every supplied amount, even on metadata-only updates."""
-    validate_amount(payment.amount_required, "amount_required")
-    validate_amount(payment.amount_paid, "amount_paid")
-    validate_amount(payment.amount_locked, "amount_locked")
-    validate_amount(payment.amount_refunded, "amount_refunded")
+    validate_payment_amounts(payment)
     if update.paid_amount is not None:
         validate_amount(
             update.paid_amount,
@@ -363,13 +361,13 @@ def apply_payment_update(
     if update is None:
         return payment
 
-    _validate_update_amounts(payment, update)
     snapshot = _snapshot_payment_state(payment)
 
     try:
         if not _record_provider_event(payment, update.provider_event_id):
             return payment
 
+        _validate_update_amounts(payment, update)
         if update.external_id is not None:
             payment.external_id = update.external_id
         if update.fraud_message is not None:
