@@ -176,10 +176,9 @@ class TestApplyPaymentUpdate:
         assert payment.status == PaymentStatus.PAID
 
     def test_locked_in_wrong_status_raises(self) -> None:
-        """LOCKED outside NEW/PREPARED/PRE_AUTH must raise, not silently
-        return."""
+        """Reject an invalid state even with an authorization within bounds."""
         payment = MockPayment(
-            status=PaymentStatus.PAID, amount_paid=Decimal("100.00")
+            status=PaymentStatus.PARTIAL, amount_paid=Decimal("40.00")
         )
 
         with pytest.raises(InvalidTransitionError, match="Cannot lock"):
@@ -191,7 +190,7 @@ class TestApplyPaymentUpdate:
                 ),
             )
 
-        assert payment.status == PaymentStatus.PAID
+        assert payment.status == PaymentStatus.PARTIAL
 
     def test_fraud_event_updates_message(self) -> None:
         payment = MockPayment(fraud_status=FraudStatus.UNKNOWN)

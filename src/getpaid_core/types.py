@@ -50,7 +50,14 @@ class TransactionResult:
 
 @dataclass(slots=True)
 class ChargeResult:
-    """Result of charging a pre-authorized payment."""
+    """Result of charging a pre-authorized payment.
+
+    ``amount_charged``, ``success`` and ``async_call`` are core-owned
+    fields and safe for diagnostics. ``provider_data`` is plugin-defined
+    and may carry stored credentials, raw provider responses or buyer
+    details: core never logs it, and neither should callers without
+    redacting it first.
+    """
 
     amount_charged: Decimal
     success: bool

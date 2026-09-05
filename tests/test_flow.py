@@ -80,6 +80,26 @@ class TestPrepare:
 
         assert payment.provider_data["customer_ip"] == "10.0.0.8"
 
+    @pytest.mark.asyncio
+    async def test_prepare_accepts_unset_status(self, flow):
+        """An empty status reads as NEW, exactly as the FSM coerces it."""
+        payment = MockPayment(backend="mock", status="")
+
+        result = await flow.prepare(payment)
+
+        assert result.external_id == "ext-pay-1"
+        assert payment.status == PaymentStatus.PREPARED
+
+    @pytest.mark.asyncio
+    async def test_prepare_accepts_missing_status(self, flow):
+        """A ``None`` status reads as NEW, exactly as the FSM coerces it."""
+        payment = MockPayment(backend="mock", status=None)
+
+        result = await flow.prepare(payment)
+
+        assert result.external_id == "ext-pay-1"
+        assert payment.status == PaymentStatus.PREPARED
+
 
 class TestHandleCallback:
     @pytest.mark.asyncio
@@ -234,6 +254,46 @@ class TestChargeFailurePaths:
         assert mock_repo.save_calls == 1
 
     @pytest.mark.asyncio
+    async def test_declined_charge_log_omits_provider_data(
+        self, flow, mock_repo, caplog
+    ):
+        """The decline WARNING must carry safe correlation only: provider
+        metadata is plugin-defined and may hold tokens or buyer details."""
+        payment = MockPayment(
+            backend="mock",
+            status=PaymentStatus.PRE_AUTH,
+            amount_locked=Decimal("100.00"),
+            external_id="ext-decline-1",
+        )
+        mock_repo._payments[payment.id] = payment
+
+        with patch.object(
+            MockProcessor,
+            "charge",
+            new_callable=AsyncMock,
+            return_value=ChargeResult(
+                amount_charged=Decimal("0"),
+                success=False,
+                provider_data={
+                    "error": "declined",
+                    "auth": {"card": {"token": "SYNTHETIC-TOKEN-MARKER"}},
+                    "buyer": {"email": "SYNTHETIC-PII-MARKER@example.com"},
+                },
+            ),
+        ):
+            await flow.charge(payment)
+
+        assert "SYNTHETIC-TOKEN-MARKER" not in caplog.text
+        assert "SYNTHETIC-PII-MARKER" not in caplog.text
+
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 1
+        message = warnings[0].getMessage()
+        assert payment.id in message
+        assert "ext-decline-1" in message
+        assert "'backend': 'mock'" in message
+
+    @pytest.mark.asyncio
     async def test_local_update_failure_after_gateway_success(
         self, flow, mock_repo, caplog
     ):
@@ -264,6 +324,56 @@ class TestChargeFailurePaths:
         critical = [r for r in caplog.records if r.levelname == "CRITICAL"]
         assert len(critical) == 1
         assert payment.id in critical[0].getMessage()
+
+    @pytest.mark.asyncio
+    async def test_reconciliation_log_omits_provider_data(
+        self, flow, mock_repo, caplog
+    ):
+        """The reconciliation CRITICAL must carry safe correlation only;
+        the full result stays on the raised error for recovery."""
+        payment = MockPayment(
+            backend="mock",
+            status=PaymentStatus.PRE_AUTH,
+            amount_locked=Decimal("100.00"),
+            external_id="ext-reconcile-1",
+        )
+        sensitive = {
+            "auth": {"card": {"token": "SYNTHETIC-TOKEN-MARKER"}},
+            "buyer": {"email": "SYNTHETIC-PII-MARKER@example.com"},
+        }
+
+        with (
+            patch.object(
+                MockProcessor,
+                "charge",
+                new_callable=AsyncMock,
+                return_value=ChargeResult(
+                    amount_charged=Decimal("100.00"),
+                    success=True,
+                    provider_data=sensitive,
+                ),
+            ),
+            patch(
+                "getpaid_core.flow.apply_payment_update",
+                side_effect=InvalidTransitionError("boom"),
+            ),
+            pytest.raises(ReconciliationRequiredError) as exc_info,
+        ):
+            await flow.charge(payment)
+
+        assert "SYNTHETIC-TOKEN-MARKER" not in caplog.text
+        assert "SYNTHETIC-PII-MARKER" not in caplog.text
+
+        critical = [r for r in caplog.records if r.levelname == "CRITICAL"]
+        assert len(critical) == 1
+        message = critical[0].getMessage()
+        assert payment.id in message
+        assert "ext-reconcile-1" in message
+        assert "reconciliation" in message.lower()
+
+        # Full evidence is preserved on the error, not in the logs.
+        assert exc_info.value.charge_result is not None
+        assert exc_info.value.charge_result.provider_data == sensitive
 
     @pytest.mark.asyncio
     async def test_save_failure_after_gateway_success(self, flow, mock_repo):
@@ -367,3 +477,83 @@ class TestPreconditions:
 
         with pytest.raises(InvalidTransitionError, match="Cannot start refund"):
             await flow.start_refund(payment)
+
+    @pytest.mark.asyncio
+    async def test_prepare_requires_new(self, flow):
+        payment = MockPayment(backend="mock", status=PaymentStatus.PAID)
+
+        with pytest.raises(InvalidTransitionError, match="Cannot prepare"):
+            await flow.prepare(payment)
+
+    @pytest.mark.asyncio
+    async def test_repeated_prepare_makes_no_api_call(self, flow, mock_repo):
+        """A second prepare must not create another provider order."""
+        payment = MockPayment(
+            backend="mock",
+            status=PaymentStatus.PREPARED,
+            external_id="ext-pay-1",
+        )
+
+        with patch.object(
+            MockProcessor,
+            "prepare_transaction",
+            new_callable=AsyncMock,
+        ) as mock_prepare:
+            with pytest.raises(InvalidTransitionError):
+                await flow.prepare(payment)
+            mock_prepare.assert_not_called()
+
+        assert payment.external_id == "ext-pay-1"
+        assert payment.status == PaymentStatus.PREPARED
+        assert mock_repo.save_calls == 0
+
+    @pytest.mark.asyncio
+    async def test_prepare_on_paid_makes_no_api_call(self, flow, mock_repo):
+        """Preparing a paid payment must not reach the provider."""
+        payment = MockPayment(
+            backend="mock",
+            status=PaymentStatus.PAID,
+            amount_paid=Decimal("100.00"),
+            external_id="ext-pay-1",
+        )
+
+        with patch.object(
+            MockProcessor,
+            "prepare_transaction",
+            new_callable=AsyncMock,
+        ) as mock_prepare:
+            with pytest.raises(InvalidTransitionError):
+                await flow.prepare(payment)
+            mock_prepare.assert_not_called()
+
+        assert payment.external_id == "ext-pay-1"
+        assert payment.status == PaymentStatus.PAID
+        assert mock_repo.save_calls == 0
+
+    @pytest.mark.asyncio
+    async def test_cancel_refund_requires_refundable_status(self, flow):
+        payment = MockPayment(backend="mock", status=PaymentStatus.NEW)
+
+        with pytest.raises(
+            InvalidTransitionError, match="Cannot cancel refund"
+        ):
+            await flow.cancel_refund(payment)
+
+    @pytest.mark.asyncio
+    async def test_cancel_refund_makes_no_api_call_when_invalid(
+        self, flow, mock_repo
+    ):
+        """Cancelling a refund that cannot exist must not reach the provider."""
+        payment = MockPayment(backend="mock", status=PaymentStatus.NEW)
+
+        with patch.object(
+            MockProcessor,
+            "cancel_refund",
+            new_callable=AsyncMock,
+        ) as mock_cancel:
+            with pytest.raises(InvalidTransitionError):
+                await flow.cancel_refund(payment)
+            mock_cancel.assert_not_called()
+
+        assert payment.status == PaymentStatus.NEW
+        assert mock_repo.save_calls == 0

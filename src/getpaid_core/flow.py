@@ -5,11 +5,14 @@ from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
 
+from getpaid_core._amounts import validate_amount
+from getpaid_core._amounts import validate_payment_amounts
 from getpaid_core.enums import PaymentEvent
 from getpaid_core.enums import PaymentStatus
 from getpaid_core.exceptions import InvalidTransitionError
 from getpaid_core.exceptions import ReconciliationRequiredError
 from getpaid_core.fsm import apply_payment_update
+from getpaid_core.fsm import coerce_payment_status
 from getpaid_core.protocols import Order
 from getpaid_core.protocols import Payment
 from getpaid_core.protocols import PaymentRepository
@@ -25,6 +28,39 @@ from getpaid_core.validators import run_validators
 logger = logging.getLogger(__name__)
 
 OperationValidator = Callable[[dict[str, Any]], dict[str, Any]]
+
+
+def _charge_log_summary(
+    payment: Payment,
+    result: ChargeResult,
+) -> dict[str, Any]:
+    """Build an allowlisted, log-safe summary of a charge outcome.
+
+    Only core-owned, typed fields are included: payment and operation
+    identity, the provider correlation handle, the outcome flags and the
+    amounts. ``ChargeResult.provider_data`` is plugin-defined
+    ``dict[str, Any]`` -- it may carry stored-credential tokens, buyer
+    details or raw provider responses -- so no key or value of it is ever
+    interpolated into a log record; only the number of entries is
+    reported, as a hint that provider metadata exists. Core has no typed
+    provider error field, so no provider error code is logged either.
+
+    Full recovery evidence stays available to the caller through
+    ``ReconciliationRequiredError.charge_result``, which is the
+    controlled channel for sensitive provider metadata.
+    """
+    return {
+        "payment_id": payment.id,
+        "operation": "charge",
+        "backend": payment.backend,
+        "external_id": payment.external_id,
+        "currency": payment.currency,
+        "success": result.success,
+        "async_call": result.async_call,
+        "amount_charged": result.amount_charged,
+        "amount_required": payment.amount_required,
+        "provider_data_entries": len(result.provider_data),
+    }
 
 
 class PaymentFlow:
@@ -70,12 +106,23 @@ class PaymentFlow:
         payment: Payment,
         **kwargs: Any,
     ) -> TransactionResult:
-        """Prepare a payment for processing."""
+        """Prepare a payment for processing.
+
+        Raises ``InvalidTransitionError`` when the payment is not NEW.
+        The check runs before the processor call, so a rejected request
+        leaves no orphaned order at the provider.
+        """
         context = self._run_operation_validators(
             operation="prepare",
             payment=payment,
             kwargs=dict(kwargs),
         )
+        status = coerce_payment_status(payment)
+        if status is not PaymentStatus.NEW:
+            raise InvalidTransitionError(
+                f"Cannot prepare payment in {status.value!r} status. "
+                "Payment must be NEW."
+            )
         processor = self.get_processor(payment)
         result = await processor.prepare_transaction(**context["kwargs"])
         apply_payment_update(
@@ -161,13 +208,31 @@ class PaymentFlow:
                 f"Cannot charge payment in {payment.status!r} status. "
                 "Payment must be PRE_AUTH or IN_CHARGE."
             )
+        validate_payment_amounts(payment)
+        available = min(
+            payment.amount_locked, payment.amount_required - payment.amount_paid
+        )
+        amount = context["kwargs"].get("amount")
+        if amount is None:
+            amount = available
+        validate_amount(
+            amount, "Charge amount", allow_zero=False, maximum=available
+        )
+        context["kwargs"]["amount"] = amount
         processor = self.get_processor(payment)
         result = await processor.charge(**context["kwargs"])
+        self._validate_provider_amount(
+            payment,
+            result.amount_charged,
+            result,
+            operation="charge",
+            maximum=amount if result.success else Decimal("0"),
+            allow_zero=not result.success or result.async_call,
+        )
         if not result.success:
             logger.warning(
-                "Gateway declined charge for payment %s: %r",
-                payment.id,
-                result,
+                "Gateway declined charge: %s",
+                _charge_log_summary(payment, result),
             )
             apply_payment_update(
                 payment,
@@ -198,11 +263,10 @@ class PaymentFlow:
             # locally -- surface a dedicated error for reconciliation
             # instead of the bare local failure.
             logger.critical(
-                "Gateway charge succeeded but local update failed for "
-                "payment %s; gateway result: %r. "
-                "Manual reconciliation required.",
-                payment.id,
-                result,
+                "Gateway charge succeeded but local update failed; "
+                "manual reconciliation required (full provider result on "
+                "ReconciliationRequiredError.charge_result): %s",
+                _charge_log_summary(payment, result),
                 exc_info=True,
             )
             raise ReconciliationRequiredError(
@@ -233,8 +297,16 @@ class PaymentFlow:
                 f"Cannot release lock for payment in {payment.status!r} "
                 "status. Payment must be PRE_AUTH."
             )
+        validate_payment_amounts(payment)
+        validate_amount(
+            payment.amount_locked, "amount_locked", allow_zero=False
+        )
+        available = payment.amount_locked
         processor = self.get_processor(payment)
         amount = await processor.release_lock(**context["kwargs"])
+        self._validate_provider_amount(
+            payment, amount, amount, operation="release_lock", maximum=available
+        )
         apply_payment_update(
             payment,
             PaymentUpdate(payment_event=PaymentEvent.LOCK_RELEASED),
@@ -263,8 +335,24 @@ class PaymentFlow:
                 f"Cannot start refund for payment in {payment.status!r} "
                 "status. Payment must be PAID, PARTIAL, or REFUND_STARTED."
             )
+        validate_payment_amounts(payment)
+        available = payment.amount_paid - payment.amount_refunded
+        amount = context["kwargs"].get("amount")
+        if amount is None:
+            amount = available
+        validate_amount(
+            amount, "Refund amount", allow_zero=False, maximum=available
+        )
+        context["kwargs"]["amount"] = amount
         processor = self.get_processor(payment)
         result = await processor.start_refund(**context["kwargs"])
+        self._validate_provider_amount(
+            payment,
+            result.amount,
+            result,
+            operation="start_refund",
+            maximum=amount,
+        )
         apply_payment_update(
             payment,
             PaymentUpdate(
@@ -280,12 +368,28 @@ class PaymentFlow:
         payment: Payment,
         **kwargs: Any,
     ) -> bool:
-        """Cancel an in-progress refund."""
+        """Cancel an in-progress refund.
+
+        Returns the processor's success flag. Raises
+        ``InvalidTransitionError`` when the payment has no refund to
+        cancel -- before the processor call, so an invalid cancellation
+        never reaches the provider.
+        """
         context = self._run_operation_validators(
             operation="cancel_refund",
             payment=payment,
             kwargs=dict(kwargs),
         )
+        status = coerce_payment_status(payment)
+        if status not in {
+            PaymentStatus.REFUND_STARTED,
+            PaymentStatus.PAID,
+            PaymentStatus.PARTIAL,
+        }:
+            raise InvalidTransitionError(
+                f"Cannot cancel refund for payment in {status.value!r} "
+                "status. Payment must be REFUND_STARTED, PAID, or PARTIAL."
+            )
         processor = self.get_processor(payment)
         success = await processor.cancel_refund(**context["kwargs"])
         if success:
@@ -308,6 +412,46 @@ class PaymentFlow:
         processor_class = self.registry.get_by_slug(payment.backend)
         backend_config = self.config.get(payment.backend, {})
         return processor_class(payment, config=backend_config)
+
+    @staticmethod
+    def _validate_provider_amount(
+        payment: Payment,
+        amount: Decimal,
+        result: Any,
+        *,
+        operation: str,
+        maximum: Decimal,
+        allow_zero: bool = False,
+    ) -> None:
+        try:
+            validate_amount(
+                amount,
+                f"{operation} result amount",
+                allow_zero=allow_zero,
+                maximum=maximum,
+                maximum_name="requested amount",
+            )
+            if operation == "release_lock" and amount != maximum:
+                raise InvalidTransitionError(
+                    "Lock release result must cover the full authorization."
+                )
+        except InvalidTransitionError as exc:
+            # The command already reached the provider. Do not treat an
+            # invalid result as a safely rejected request or mutate state.
+            context = {
+                "payment_id": payment.id,
+                "operation": operation,
+                "provider_result": result,
+            }
+            charge_result = result if isinstance(result, ChargeResult) else None
+            if charge_result is not None:
+                context["charge_result"] = charge_result
+            raise ReconciliationRequiredError(
+                f"Gateway returned an invalid {operation} amount for payment "
+                f"{payment.id!r}; manual reconciliation required.",
+                context=context,
+                charge_result=charge_result,
+            ) from exc
 
     def _run_operation_validators(
         self,

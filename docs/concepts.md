@@ -45,10 +45,63 @@ with the current payment state. This applies to *every* event, including
 
 ### Amount Handling
 
-- `locked_amount` stores a pre-authorized amount.
-- `paid_amount` updates captured funds and may reduce `amount_locked`.
-- `refunded_amount` tracks refund progress.
-- `provider_data` stores provider-specific metadata such as refund IDs and applied callback IDs.
+All financial values must be finite `Decimal` instances; core does not coerce
+strings, floats, or integers. Stored balances must satisfy
+`0 <= amount_refunded <= amount_paid <= amount_required` and
+`0 <= amount_locked <= amount_required - amount_paid`.
+
+#### Requests and results
+
+After application operation validators run, `PaymentFlow` validates charge,
+refund, and lock-release amounts before constructing or calling the processor.
+Existing status restrictions still apply.
+
+| Operation | Effective request | Supported result amount |
+|-----------|-------------------|-------------------------|
+| `charge` | Positive, at most `min(amount_locked, amount_required - amount_paid)` | Successful synchronous capture: positive, at most the request; async acceptance: zero through the request; decline: exactly zero |
+| `start_refund` | Positive, at most `amount_paid - amount_refunded` | Positive, at most the request; acceptance is not settlement |
+| `release_lock` | The entire positive `amount_locked` | Exactly the authorization being released; partial release is not supported |
+
+For both charge and refund, `amount=None` (including an amount removed or set to
+`None` by a validator) means the **remaining available balance**, not the original
+total. Core passes that explicit `Decimal` to the processor. Exhausted balances
+and zero requests are rejected with `InvalidTransitionError`, without a provider
+call or repository save.
+
+Invalid returned amounts raise `ReconciliationRequiredError` before changing
+local state. Its `context` contains `payment_id`, `operation`, and
+`provider_result`; charge errors also retain `charge_result`. A provider call has
+already happened: do not blindly retry. Inspect provider state and reconcile;
+local rejection cannot undo a remote action. Result evidence is untrusted
+provider data and must not be logged or exposed indiscriminately.
+
+#### Incoming snapshots
+
+- `locked_amount` is an explicit, positive remaining authorization, bounded by
+  `amount_required - amount_paid`. `LOCKED` cannot create `PRE_AUTH` with zero or
+  absent authorization.
+- `paid_amount` and `refunded_amount` are explicit **cumulative** totals for their
+  respective events. Zero is a valid observation, not a new money-moving request.
+  Captured totals cannot exceed `amount_required`; refunded totals cannot exceed
+  `amount_paid`. Captured increments reduce `amount_locked`.
+- Within permitted lifecycle transitions, a lower valid cumulative snapshot
+  preserves the larger recorded total. Negative and non-finite values are invalid,
+  not stale observations. This does not change capture/refund lifecycle ordering
+  rules or permit new transitions after refunds.
+- Every supplied financial field is validated, including fields on metadata-only
+  updates. Invalid updates roll back amounts, status, external ID, fraud state,
+  metadata, and the provider event ID. Already-applied event IDs remain no-op
+  replays, even if the available authorization has since changed.
+- `provider_data` stores provider-specific metadata such as refund IDs and applied
+  callback IDs.
+
+These checks protect the current payment snapshot; they do not reserve pending
+amounts, serialize concurrent calls, or provide an operation-idempotency contract.
+
+**Compatibility:** plugins that previously relied on receiving `None` from the
+flow now receive a concrete remaining amount. Previously accepted invalid money
+is rejected; zero remains supported only for cumulative observations, pending
+charge results, and declined charge results as specified above.
 
 ## Fraud Statuses
 
@@ -152,7 +205,8 @@ slugs; it also subclasses `KeyError` so legacy `except KeyError` code keeps
 working. `ReconciliationRequiredError` is raised by `PaymentFlow.charge()`
 when the gateway charge succeeded but recording it locally failed — it
 carries the gateway result in its `charge_result` attribute so operators
-can reconcile the payment manually.
+can reconcile the payment manually. That result may contain sensitive
+provider metadata — see [Logging and Diagnostics](#logging-and-diagnostics).
 
 All exceptions accept an optional `context` dict for structured error info:
 
@@ -170,3 +224,45 @@ raise ChargeFailure("Gateway returned 500", context={"status_code": 500})
 | `PaymentUpdate` | Dataclass describing semantic payment/fraud events and amounts |
 | `RefundResult` | Dataclass with refund amount and provider metadata |
 | `TransactionResult` | Dataclass with redirect, method, external ID, and provider metadata |
+
+## Logging and Diagnostics
+
+Core logs charge outcomes through the `getpaid_core.flow` logger: a
+WARNING when the gateway declines a charge, and a CRITICAL when the
+gateway charge succeeded but recording it locally failed. Into both
+records core interpolates one allowlisted summary of safe, core-owned
+fields, and nothing else of its own:
+
+| Field | Source |
+|-------|--------|
+| `payment_id` | `Payment.id` |
+| `operation` | the flow operation (`"charge"`) |
+| `backend` | `Payment.backend` |
+| `external_id` | `Payment.external_id`, the provider correlation handle |
+| `currency` | `Payment.currency` |
+| `success`, `async_call` | `ChargeResult` outcome flags |
+| `amount_charged` | `ChargeResult.amount_charged` |
+| `amount_required` | `Payment.amount_required` |
+| `provider_data_entries` | how many `provider_data` entries the result holds — no keys, no values |
+
+The CRITICAL record additionally carries the local failure's traceback
+(`exc_info`), which comes from the repository or FSM code that raised —
+not from the provider result. A repository whose exception messages
+embed payment data therefore still reaches the log sink through that
+traceback; that payload is the adapter's to control, not core's.
+
+`provider_data` is plugin-defined `dict[str, Any]`. It may hold stored
+credentials, raw provider responses or buyer details, so core never
+interpolates its keys or values into a log record; failure paths are
+exactly where such payloads are most likely to be present. Core has no
+typed provider error field either, so it logs no provider error code — a
+backend that knows its provider's response schema can log its own
+allowlist.
+
+Full recovery evidence is preserved on the raised
+`ReconciliationRequiredError`: `charge_result` (the same object is also
+under `context["charge_result"]`) carries the untouched `ChargeResult`,
+`provider_data` included. Treat it as sensitive — route it to a
+controlled channel such as an operator-only reconciliation record, and do
+not hand it to a general-purpose logger or an error-reporting service
+without redacting it first.
