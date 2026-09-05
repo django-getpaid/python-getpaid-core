@@ -280,10 +280,10 @@ class TestThreadSafety:
                 assert result is PLNProcessor
 
 
-OVERLAP_TIMEOUT = 5
+OVERLAP_TIMEOUT_SECONDS = 5
 
 
-class PausingCurrencies(list):
+class PausingCurrencies(Sequence[str]):
     """A plugin-owned currency sequence that blocks the reading thread.
 
     It only controls scheduling so a query can be caught mid-iteration;
@@ -296,22 +296,28 @@ class PausingCurrencies(list):
         entered: threading.Event,
         resume: threading.Event,
     ) -> None:
-        super().__init__(values)
+        self._values = tuple(values)
         self.entered = entered
         self.resume = resume
 
     def _pause(self) -> None:
         self.entered.set()
-        if not self.resume.wait(timeout=OVERLAP_TIMEOUT):
+        if not self.resume.wait(timeout=OVERLAP_TIMEOUT_SECONDS):
             raise TimeoutError("The writer never released the reader.")
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def __getitem__(self, index):
+        return self._values[index]
 
     def __contains__(self, value: object) -> bool:
         self._pause()
-        return super().__contains__(value)
+        return value in self._values
 
     def __iter__(self) -> Iterator[str]:
         self._pause()
-        return super().__iter__()
+        return iter(self._values)
 
 
 class TestQueryWriteOverlap:
@@ -349,13 +355,13 @@ class TestQueryWriteOverlap:
         with ThreadPoolExecutor(max_workers=1) as pool:
             reader = pool.submit(query)
             try:
-                assert entered.wait(timeout=OVERLAP_TIMEOUT), (
+                assert entered.wait(timeout=OVERLAP_TIMEOUT_SECONDS), (
                     "query never paused"
                 )
                 mutate()
             finally:
                 resume.set()
-            return reader.result(timeout=OVERLAP_TIMEOUT)
+            return reader.result(timeout=OVERLAP_TIMEOUT_SECONDS)
 
     def test_get_for_currency_survives_concurrent_unregister(self) -> None:
         registry, entered, resume = self._pausing_registry()
