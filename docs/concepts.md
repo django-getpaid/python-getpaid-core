@@ -205,7 +205,8 @@ slugs; it also subclasses `KeyError` so legacy `except KeyError` code keeps
 working. `ReconciliationRequiredError` is raised by `PaymentFlow.charge()`
 when the gateway charge succeeded but recording it locally failed — it
 carries the gateway result in its `charge_result` attribute so operators
-can reconcile the payment manually.
+can reconcile the payment manually. That result may contain sensitive
+provider metadata — see [Logging and Diagnostics](#logging-and-diagnostics).
 
 All exceptions accept an optional `context` dict for structured error info:
 
@@ -223,3 +224,45 @@ raise ChargeFailure("Gateway returned 500", context={"status_code": 500})
 | `PaymentUpdate` | Dataclass describing semantic payment/fraud events and amounts |
 | `RefundResult` | Dataclass with refund amount and provider metadata |
 | `TransactionResult` | Dataclass with redirect, method, external ID, and provider metadata |
+
+## Logging and Diagnostics
+
+Core logs charge outcomes through the `getpaid_core.flow` logger: a
+WARNING when the gateway declines a charge, and a CRITICAL when the
+gateway charge succeeded but recording it locally failed. Into both
+records core interpolates one allowlisted summary of safe, core-owned
+fields, and nothing else of its own:
+
+| Field | Source |
+|-------|--------|
+| `payment_id` | `Payment.id` |
+| `operation` | the flow operation (`"charge"`) |
+| `backend` | `Payment.backend` |
+| `external_id` | `Payment.external_id`, the provider correlation handle |
+| `currency` | `Payment.currency` |
+| `success`, `async_call` | `ChargeResult` outcome flags |
+| `amount_charged` | `ChargeResult.amount_charged` |
+| `amount_required` | `Payment.amount_required` |
+| `provider_data_entries` | how many `provider_data` entries the result holds — no keys, no values |
+
+The CRITICAL record additionally carries the local failure's traceback
+(`exc_info`), which comes from the repository or FSM code that raised —
+not from the provider result. A repository whose exception messages
+embed payment data therefore still reaches the log sink through that
+traceback; that payload is the adapter's to control, not core's.
+
+`provider_data` is plugin-defined `dict[str, Any]`. It may hold stored
+credentials, raw provider responses or buyer details, so core never
+interpolates its keys or values into a log record; failure paths are
+exactly where such payloads are most likely to be present. Core has no
+typed provider error field either, so it logs no provider error code — a
+backend that knows its provider's response schema can log its own
+allowlist.
+
+Full recovery evidence is preserved on the raised
+`ReconciliationRequiredError`: `charge_result` (the same object is also
+under `context["charge_result"]`) carries the untouched `ChargeResult`,
+`provider_data` included. Treat it as sensitive — route it to a
+controlled channel such as an operator-only reconciliation record, and do
+not hand it to a general-purpose logger or an error-reporting service
+without redacting it first.
