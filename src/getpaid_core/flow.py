@@ -10,6 +10,7 @@ from getpaid_core.enums import PaymentStatus
 from getpaid_core.exceptions import InvalidTransitionError
 from getpaid_core.exceptions import ReconciliationRequiredError
 from getpaid_core.fsm import apply_payment_update
+from getpaid_core.fsm import coerce_payment_status
 from getpaid_core.protocols import Order
 from getpaid_core.protocols import Payment
 from getpaid_core.protocols import PaymentRepository
@@ -70,15 +71,21 @@ class PaymentFlow:
         payment: Payment,
         **kwargs: Any,
     ) -> TransactionResult:
-        """Prepare a payment for processing."""
+        """Prepare a payment for processing.
+
+        Raises ``InvalidTransitionError`` when the payment is not NEW.
+        The check runs before the processor call, so a rejected request
+        leaves no orphaned order at the provider.
+        """
         context = self._run_operation_validators(
             operation="prepare",
             payment=payment,
             kwargs=dict(kwargs),
         )
-        if payment.status != PaymentStatus.NEW:
+        status = coerce_payment_status(payment)
+        if status is not PaymentStatus.NEW:
             raise InvalidTransitionError(
-                f"Cannot prepare payment in {payment.status!r} status. "
+                f"Cannot prepare payment in {status.value!r} status. "
                 "Payment must be NEW."
             )
         processor = self.get_processor(payment)
@@ -285,19 +292,26 @@ class PaymentFlow:
         payment: Payment,
         **kwargs: Any,
     ) -> bool:
-        """Cancel an in-progress refund."""
+        """Cancel an in-progress refund.
+
+        Returns the processor's success flag. Raises
+        ``InvalidTransitionError`` when the payment has no refund to
+        cancel -- before the processor call, so an invalid cancellation
+        never reaches the provider.
+        """
         context = self._run_operation_validators(
             operation="cancel_refund",
             payment=payment,
             kwargs=dict(kwargs),
         )
-        if payment.status not in {
+        status = coerce_payment_status(payment)
+        if status not in {
             PaymentStatus.REFUND_STARTED,
             PaymentStatus.PAID,
             PaymentStatus.PARTIAL,
         }:
             raise InvalidTransitionError(
-                f"Cannot cancel refund for payment in {payment.status!r} "
+                f"Cannot cancel refund for payment in {status.value!r} "
                 "status. Payment must be REFUND_STARTED, PAID, or PARTIAL."
             )
         processor = self.get_processor(payment)

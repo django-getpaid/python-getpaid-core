@@ -80,6 +80,26 @@ class TestPrepare:
 
         assert payment.provider_data["customer_ip"] == "10.0.0.8"
 
+    @pytest.mark.asyncio
+    async def test_prepare_accepts_unset_status(self, flow):
+        """An empty status reads as NEW, exactly as the FSM coerces it."""
+        payment = MockPayment(backend="mock", status="")
+
+        result = await flow.prepare(payment)
+
+        assert result.external_id == "ext-pay-1"
+        assert payment.status == PaymentStatus.PREPARED
+
+    @pytest.mark.asyncio
+    async def test_prepare_accepts_missing_status(self, flow):
+        """A ``None`` status reads as NEW, exactly as the FSM coerces it."""
+        payment = MockPayment(backend="mock", status=None)
+
+        result = await flow.prepare(payment)
+
+        assert result.external_id == "ext-pay-1"
+        assert payment.status == PaymentStatus.PREPARED
+
 
 class TestHandleCallback:
     @pytest.mark.asyncio
