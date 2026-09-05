@@ -182,6 +182,14 @@ class PaymentFlow:
         context["kwargs"]["amount"] = amount
         processor = self.get_processor(payment)
         result = await processor.charge(**context["kwargs"])
+        self._validate_provider_amount(
+            payment,
+            result.amount_charged,
+            result,
+            operation="charge",
+            maximum=amount if result.success else Decimal("0"),
+            allow_zero=not result.success or result.async_call,
+        )
         if not result.success:
             logger.warning(
                 "Gateway declined charge for payment %s: %r",
@@ -252,8 +260,15 @@ class PaymentFlow:
                 f"Cannot release lock for payment in {payment.status!r} "
                 "status. Payment must be PRE_AUTH."
             )
+        validate_amount(
+            payment.amount_locked, "amount_locked", allow_zero=False
+        )
+        available = payment.amount_locked
         processor = self.get_processor(payment)
         amount = await processor.release_lock(**context["kwargs"])
+        self._validate_provider_amount(
+            payment, amount, amount, operation="release_lock", maximum=available
+        )
         apply_payment_update(
             payment,
             PaymentUpdate(payment_event=PaymentEvent.LOCK_RELEASED),
@@ -299,6 +314,13 @@ class PaymentFlow:
         context["kwargs"]["amount"] = amount
         processor = self.get_processor(payment)
         result = await processor.start_refund(**context["kwargs"])
+        self._validate_provider_amount(
+            payment,
+            result.amount,
+            result,
+            operation="start_refund",
+            maximum=amount,
+        )
         apply_payment_update(
             payment,
             PaymentUpdate(
@@ -342,6 +364,42 @@ class PaymentFlow:
         processor_class = self.registry.get_by_slug(payment.backend)
         backend_config = self.config.get(payment.backend, {})
         return processor_class(payment, config=backend_config)
+
+    @staticmethod
+    def _validate_provider_amount(
+        payment: Payment,
+        amount: Decimal,
+        result: Any,
+        *,
+        operation: str,
+        maximum: Decimal,
+        allow_zero: bool = False,
+    ) -> None:
+        try:
+            validate_amount(
+                amount,
+                f"{operation} result amount",
+                allow_zero=allow_zero,
+                maximum=maximum,
+                maximum_name="requested amount",
+            )
+        except InvalidTransitionError as exc:
+            # The command already reached the provider. Do not treat an
+            # invalid result as a safely rejected request or mutate state.
+            context = {
+                "payment_id": payment.id,
+                "operation": operation,
+                "provider_result": result,
+            }
+            charge_result = result if isinstance(result, ChargeResult) else None
+            if charge_result is not None:
+                context["charge_result"] = charge_result
+            raise ReconciliationRequiredError(
+                f"Gateway returned an invalid {operation} amount for payment "
+                f"{payment.id!r}; manual reconciliation required.",
+                context=context,
+                charge_result=charge_result,
+            ) from exc
 
     def _run_operation_validators(
         self,
