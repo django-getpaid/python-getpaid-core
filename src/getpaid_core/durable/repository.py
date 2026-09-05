@@ -84,8 +84,20 @@ class DurablePaymentRepository(Protocol):
     async def list_unresolved_operations(self) -> Sequence[OperationRecord]:
         """Return operations still holding a payment or needing work.
 
-        This is how a restarted process discovers what to reconcile,
+        This is how a restarted process discovers commands to resolve,
         without relying on an exception, a log line or a caller object.
+        """
+        ...
+
+    async def list_payments_requiring_reconciliation(
+        self,
+    ) -> Sequence[PaymentFacts]:
+        """Return payments whose facts carry a reconciliation requirement.
+
+        Not all reconciliation work has an operation behind it: evidence
+        that arrives on its own -- a provider event identity reused with
+        different content, say -- flags the payment without any command
+        being outstanding. A restarted process finds that work here.
         """
         ...
 
@@ -100,6 +112,7 @@ MANDATORY_OPERATIONS: tuple[str, ...] = (
     "record_operation_outcome",
     "get_operation",
     "list_unresolved_operations",
+    "list_payments_requiring_reconciliation",
 )
 
 

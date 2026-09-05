@@ -15,6 +15,7 @@ from typing import Any
 from typing import cast
 
 from getpaid_core._amounts import validate_amount
+from getpaid_core.durable.records import CANCELLATION_TARGET
 from getpaid_core.durable.records import TERMINAL_OPERATION_STATES
 from getpaid_core.durable.records import ObservationPlan
 from getpaid_core.durable.records import OperationIntent
@@ -193,7 +194,7 @@ def _blocking_operation(
     never overlap on the same funds. The single exception is a refund
     cancellation, which is allowed to target the pending refund it names.
     """
-    target = intent.parameters.get("target_operation_id")
+    target = intent.parameters.get(CANCELLATION_TARGET)
     for record in operations:
         if not record.is_active:
             continue
@@ -208,11 +209,11 @@ def _blocking_operation(
     return None
 
 
-def _cancellation_target(
+def _require_cancellation_target(
     operations: Iterable[OperationRecord], intent: OperationIntent
 ) -> None:
     """Refuse a cancellation that does not name an outstanding refund."""
-    target = intent.parameters.get("target_operation_id")
+    target = intent.parameters.get(CANCELLATION_TARGET)
     matched = any(
         record.operation_id == target
         and record.operation_type is OperationType.START_REFUND
@@ -222,7 +223,7 @@ def _cancellation_target(
     if not matched:
         raise OperationConflictError(
             "A refund cancellation must name the pending refund it cancels "
-            "through parameters['target_operation_id']; "
+            f"through parameters[{CANCELLATION_TARGET!r}]; "
             f"{target!r} is not an outstanding refund.",
             context={"operation_id": intent.operation_id, "target": target},
         )
@@ -260,7 +261,7 @@ def plan_reservation(
         return ReservationPlan(operation=record, created=False)
 
     if intent.operation_type is OperationType.CANCEL_REFUND:
-        _cancellation_target(operations, intent)
+        _require_cancellation_target(operations, intent)
 
     blocker = _blocking_operation(operations, intent)
     if blocker is not None:

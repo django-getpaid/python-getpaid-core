@@ -26,6 +26,7 @@ these, listed in `getpaid_core.durable.MANDATORY_OPERATIONS`:
 | `record_operation_outcome(payment_id, operation_id, outcome)` | Commit an operation's outcome together with the financial facts it settles |
 | `get_operation(payment_id, operation_id)` | Return one committed operation record |
 | `list_unresolved_operations()` | Return the operations still holding a payment or awaiting reconciliation |
+| `list_payments_requiring_reconciliation()` | Return the payments flagged for reconciliation, including those with no operation behind them |
 
 Each of those calls is **one atomic boundary**. The payment's financial
 facts, the affected operation record and the replay evidence commit
@@ -39,9 +40,11 @@ that run inside it — `plan_observation`, `plan_reservation` and
 Alongside the money, facts carry `reconciliation_required`. Evidence that
 cannot be applied consistently — a provider event identity reused with
 different content, for instance — sets it, and it commits with the facts.
-Reconciliation is therefore discoverable from stored state rather than
-from an exception, a log line or whatever object the caller happens to
-hold.
+Such evidence arrives on its own, with no command outstanding, so it is
+enumerated through `list_payments_requiring_reconciliation()` rather than
+through the operation list. Between the two, a restarted process finds
+its outstanding work from stored state, without an exception, a log line
+or a caller object.
 
 ## Optional, adapter-owned choices
 
@@ -171,6 +174,11 @@ These are deliberately absent here and tracked separately:
   evidence is core-owned as `ReplayRecord` from here on, but migrating
   the historical `provider_data["applied_event_ids"]` lists is separate
   work.
+- **What a processor receives** — the durable flow still builds the
+  processor from the caller's payment object, so a processor can read
+  stale financial fields from it even though nothing is written back.
+  Giving processors operation identity and immutable submission
+  parameters instead is part of the command-dispatch work.
 - **The revised public status precedence** — the ADR's rules for
   refund-in-progress, partial refunds and authorization release change
   what a payment status projects. Transitions here still run the released

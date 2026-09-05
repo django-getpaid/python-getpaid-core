@@ -52,6 +52,11 @@ class ConformingRepository:
     async def list_unresolved_operations(self) -> Sequence[OperationRecord]:
         raise NotImplementedError
 
+    async def list_payments_requiring_reconciliation(
+        self,
+    ) -> Sequence[PaymentFacts]:
+        raise NotImplementedError
+
 
 def test_mandatory_operations_match_the_protocol():
     """The capability probe must not drift from the protocol it checks."""

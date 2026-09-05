@@ -13,7 +13,9 @@ from getpaid_core.durable import OperationState
 from getpaid_core.durable import OperationType
 from getpaid_core.durable import PaymentFacts
 from getpaid_core.enums import PaymentStatus
+from getpaid_core.exceptions import InvalidTransitionError
 from getpaid_core.exceptions import UnsupportedRepositoryError
+from getpaid_core.flow import PaymentFlow
 from tests.conftest import MockPayment
 from tests.conftest import MockRepository
 
@@ -140,12 +142,36 @@ async def test_reserve_then_record_outcome_addresses_the_payment_by_identity(
     assert stale.amount_paid == Decimal("0")
 
 
+async def test_operation_validators_run_before_a_reservation_commits(
+    durable_repo, mock_registry
+):
+    seen = []
+
+    def record(context):
+        seen.append(context["operation"])
+        return context
+
+    flow = DurablePaymentFlow(
+        durable_repo, validators=[record], registry=mock_registry
+    )
+    stale = MockPayment(status=PaymentStatus.PREPARED)
+
+    await flow.handle_callback(stale, confirmation("100.00", "full"), {})
+    with pytest.raises(InvalidTransitionError):
+        await flow.reserve_operation(
+            stale,
+            OperationIntent(
+                operation_id="op-1", operation_type=OperationType.CHARGE
+            ),
+        )
+
+    assert seen == ["callback", "reserve_operation"]
+
+
 async def test_released_flow_is_untouched_by_the_durable_contract(
     mock_registry,
 ):
     """``PaymentFlow`` keeps the 3.x behaviour; it does not sniff adapters."""
-    from getpaid_core.flow import PaymentFlow
-
     repository = MockRepository()
     payment = MockPayment(status=PaymentStatus.PREPARED)
     repository._payments["pay-1"] = payment

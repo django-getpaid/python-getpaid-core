@@ -12,6 +12,7 @@ from getpaid_core.durable.conformance import run_conformance_suite
 from getpaid_core.durable.flow import DurablePaymentFlow
 from getpaid_core.durable.memory import InMemoryDurableRepository
 from getpaid_core.durable.records import ACTIVE_OPERATION_STATES
+from getpaid_core.durable.records import CANCELLATION_TARGET
 from getpaid_core.durable.records import TERMINAL_OPERATION_STATES
 from getpaid_core.durable.records import ObservationPlan
 from getpaid_core.durable.records import OperationIntent
@@ -37,6 +38,7 @@ from getpaid_core.durable.rules import plan_reservation
 
 __all__ = [
     "ACTIVE_OPERATION_STATES",
+    "CANCELLATION_TARGET",
     "CONFORMANCE_CHECKS",
     "MANDATORY_OPERATIONS",
     "TERMINAL_OPERATION_STATES",

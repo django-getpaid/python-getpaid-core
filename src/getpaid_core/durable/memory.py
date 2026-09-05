@@ -121,3 +121,12 @@ class InMemoryDurableRepository:
             for record in records
             if record.is_active or record.reconciliation_required
         )
+
+    async def list_payments_requiring_reconciliation(
+        self,
+    ) -> Sequence[PaymentFacts]:
+        return tuple(
+            facts
+            for facts in self._facts.values()
+            if facts.reconciliation_required
+        )

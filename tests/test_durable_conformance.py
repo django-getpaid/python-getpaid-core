@@ -68,6 +68,7 @@ def test_the_suite_has_checks_for_every_required_race():
         "duplicate_events_are_idempotent",
         "distinct_events_all_survive",
         "unresolved_operations_are_discoverable",
+        "reconciliation_flags_are_enumerable",
         "outstanding_operation_blocks_unrelated_commands",
     }
 
@@ -136,3 +137,6 @@ async def test_conflicting_event_identity_is_durably_flagged():
     facts = await repository.get_payment_facts("pay-1")
     assert facts.reconciliation_required is True
     assert facts.captured_funds == Decimal("40.00")
+
+    flagged = await repository.list_payments_requiring_reconciliation()
+    assert [entry.payment_id for entry in flagged] == ["pay-1"]

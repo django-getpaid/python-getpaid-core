@@ -17,7 +17,8 @@ isolation-level tests.
 The suite covers what ADR 0001 requires of this layer: a stale cumulative
 capture cannot regress committed funds, a capture racing a refund keeps
 both totals, duplicate event identities apply once while distinct ones
-all survive, and unresolved work stays discoverable after the fact.
+all survive, and unresolved work -- outstanding operations and payments
+flagged for reconciliation alike -- stays discoverable after the fact.
 
 Passing proves the semantic contract against the adapter's own storage.
 It proves nothing about a live provider, and nothing about behaviour
@@ -240,6 +241,28 @@ async def check_unresolved_operations_are_discoverable(
     )
 
 
+async def check_reconciliation_flags_are_enumerable(
+    factory: RepositoryFactory,
+) -> None:
+    """A payment flagged without any operation is still findable."""
+    repository = await factory(_prepared_facts())
+    applied = _capture("40.00", "e-1")
+    conflicting = _capture("100.00", "e-1")
+
+    await repository.apply_observation(PAYMENT_ID, applied)
+    plan = await repository.apply_observation(PAYMENT_ID, conflicting)
+    _require(
+        not plan.applied,
+        "a conflicting event identity was applied as a financial change",
+    )
+
+    flagged = await repository.list_payments_requiring_reconciliation()
+    _require(
+        any(facts.payment_id == PAYMENT_ID for facts in flagged),
+        "a payment flagged for reconciliation is not enumerable",
+    )
+
+
 async def check_outstanding_operation_blocks_unrelated_commands(
     factory: RepositoryFactory,
 ) -> None:
@@ -289,6 +312,10 @@ CONFORMANCE_CHECKS: tuple[
     (
         "unresolved_operations_are_discoverable",
         check_unresolved_operations_are_discoverable,
+    ),
+    (
+        "reconciliation_flags_are_enumerable",
+        check_reconciliation_flags_are_enumerable,
     ),
     (
         "outstanding_operation_blocks_unrelated_commands",

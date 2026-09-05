@@ -38,6 +38,18 @@ def _canonical_amount(amount: Decimal | None) -> str:
     return format(amount.normalize(), "f")
 
 
+def _canonical_parameter(value: Any) -> str:
+    """Render a request parameter so a changed type is a changed value."""
+    rendered = (
+        _canonical_amount(value) if isinstance(value, Decimal) else str(value)
+    )
+    return f"{type(value).__name__}:{rendered}"
+
+
+#: Parameter naming the pending refund a cancellation targets.
+CANCELLATION_TARGET = "target_operation_id"
+
+
 class OperationType(StrEnum):
     """The money-moving operations covered by the durable contract."""
 
@@ -183,11 +195,14 @@ class OperationIntent:
 
     @property
     def parameters_digest(self) -> str:
-        """Digest binding the identity to its request semantics."""
+        """Digest binding the identity to its request semantics.
+
+        Each value is rendered with its type, so a parameter that changed
+        from ``Decimal("100")`` to ``"100"`` -- or from ``True`` to
+        ``"True"`` -- reads as a changed intent rather than a retry.
+        """
         items = sorted(
-            (key, _canonical_amount(value))
-            if isinstance(value, Decimal)
-            else (key, str(value))
+            (key, _canonical_parameter(value))
             for key, value in self.parameters.items()
         )
         parts = [

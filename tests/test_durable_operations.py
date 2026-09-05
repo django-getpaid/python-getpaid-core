@@ -4,6 +4,7 @@ from decimal import Decimal
 
 import pytest
 
+from getpaid_core.durable import CANCELLATION_TARGET
 from getpaid_core.durable import OperationIntent
 from getpaid_core.durable import OperationOutcome
 from getpaid_core.durable import OperationRecord
@@ -103,7 +104,7 @@ def test_refund_cancellation_may_target_an_outstanding_refund():
         OperationIntent(
             operation_id="cancel-1",
             operation_type=OperationType.CANCEL_REFUND,
-            parameters={"target_operation_id": "refund-1"},
+            parameters={CANCELLATION_TARGET: "refund-1"},
         ),
     )
 
@@ -119,13 +120,36 @@ def test_refund_cancellation_must_name_an_outstanding_refund():
         status=PaymentStatus.PAID,
     )
 
-    with pytest.raises(OperationConflictError, match="target_operation_id"):
+    with pytest.raises(OperationConflictError, match=CANCELLATION_TARGET):
         plan_reservation(
             paid,
             (),
             OperationIntent(
                 operation_id="cancel-1",
                 operation_type=OperationType.CANCEL_REFUND,
+            ),
+        )
+
+
+def test_a_parameter_whose_type_changed_is_a_changed_intent():
+    reserved = plan_reservation(
+        authorized_facts(),
+        (),
+        OperationIntent(
+            operation_id="op-1",
+            operation_type=OperationType.CHARGE,
+            parameters={"descriptor": Decimal("100")},
+        ),
+    ).operation
+
+    with pytest.raises(OperationConflictError, match="parameters"):
+        plan_reservation(
+            authorized_facts(),
+            (reserved,),
+            OperationIntent(
+                operation_id="op-1",
+                operation_type=OperationType.CHARGE,
+                parameters={"descriptor": "100"},
             ),
         )
 

@@ -111,7 +111,14 @@ class DurablePaymentFlow(BaseFlow):
         provider call happens after this returns, outside the boundary
         that committed the reservation.
         """
-        return await self.repository.reserve_operation(payment.id, intent)
+        context = self._run_operation_validators(
+            operation="reserve_operation",
+            payment=payment,
+            intent=intent,
+        )
+        return await self.repository.reserve_operation(
+            payment.id, context["intent"]
+        )
 
     async def record_operation_outcome(
         self,
@@ -126,6 +133,12 @@ class DurablePaymentFlow(BaseFlow):
         no money and leaves the operation discoverable as unresolved
         work; it is never evidence that resubmission is safe.
         """
+        context = self._run_operation_validators(
+            operation="record_operation_outcome",
+            payment=payment,
+            operation_id=operation_id,
+            outcome=outcome,
+        )
         return await self.repository.record_operation_outcome(
-            payment.id, operation_id, outcome
+            payment.id, context["operation_id"], context["outcome"]
         )
