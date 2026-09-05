@@ -5,6 +5,7 @@ from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
 
+from getpaid_core._amounts import validate_amount
 from getpaid_core.enums import PaymentEvent
 from getpaid_core.enums import PaymentStatus
 from getpaid_core.exceptions import InvalidTransitionError
@@ -161,6 +162,24 @@ class PaymentFlow:
                 f"Cannot charge payment in {payment.status!r} status. "
                 "Payment must be PRE_AUTH or IN_CHARGE."
             )
+        validate_amount(payment.amount_required, "amount_required")
+        validate_amount(
+            payment.amount_paid,
+            "amount_paid",
+            maximum=payment.amount_required,
+            maximum_name="amount_required",
+        )
+        validate_amount(payment.amount_locked, "amount_locked")
+        available = min(
+            payment.amount_locked, payment.amount_required - payment.amount_paid
+        )
+        amount = context["kwargs"].get("amount")
+        if amount is None:
+            amount = available
+        validate_amount(
+            amount, "Charge amount", allow_zero=False, maximum=available
+        )
+        context["kwargs"]["amount"] = amount
         processor = self.get_processor(payment)
         result = await processor.charge(**context["kwargs"])
         if not result.success:
