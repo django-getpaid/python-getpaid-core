@@ -1,10 +1,13 @@
 """Tests for getpaid_core.registry.PluginRegistry."""
 
 import threading
+from collections.abc import Callable
+from collections.abc import Iterator
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import ClassVar
+from typing import TypeVar
 from unittest.mock import patch
 
 import pytest
@@ -15,6 +18,9 @@ from getpaid_core.processor import BaseProcessor
 from getpaid_core.registry import ENTRY_POINT_GROUP
 from getpaid_core.registry import PluginRegistry
 from getpaid_core.types import TransactionResult
+
+
+_QueryResultT = TypeVar("_QueryResultT")
 
 
 class PLNProcessor(BaseProcessor):
@@ -274,6 +280,9 @@ class TestThreadSafety:
                 assert result is PLNProcessor
 
 
+OVERLAP_TIMEOUT = 5
+
+
 class PausingCurrencies(list):
     """A plugin-owned currency sequence that blocks the reading thread.
 
@@ -293,14 +302,14 @@ class PausingCurrencies(list):
 
     def _pause(self) -> None:
         self.entered.set()
-        if not self.resume.wait(timeout=5):
+        if not self.resume.wait(timeout=OVERLAP_TIMEOUT):
             raise TimeoutError("The writer never released the reader.")
 
     def __contains__(self, value: object) -> bool:
         self._pause()
         return super().__contains__(value)
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[str]:
         self._pause()
         return super().__iter__()
 
@@ -320,9 +329,7 @@ class TestQueryWriteOverlap:
         class PausingProcessor(PLNProcessor):
             slug = "pausing-pay"
             display_name = "Pausing Payments"
-            accepted_currencies = PausingCurrencies(
-                ["PLN"], entered, resume
-            )
+            accepted_currencies = PausingCurrencies(["PLN"], entered, resume)
 
         registry = PluginRegistry()
         registry._discovered = True
@@ -331,17 +338,24 @@ class TestQueryWriteOverlap:
         return registry, entered, resume
 
     @staticmethod
-    def _run_overlapped(query, mutate, entered, resume):
+    def _run_overlapped(
+        query: Callable[[], _QueryResultT],
+        mutate: Callable[[], None],
+        entered: threading.Event,
+        resume: threading.Event,
+    ) -> _QueryResultT:
         """Start ``query``, run ``mutate`` while it is paused mid-query,
         then let the query finish and return its result."""
         with ThreadPoolExecutor(max_workers=1) as pool:
             reader = pool.submit(query)
             try:
-                assert entered.wait(timeout=5), "query never paused"
+                assert entered.wait(timeout=OVERLAP_TIMEOUT), (
+                    "query never paused"
+                )
                 mutate()
             finally:
                 resume.set()
-            return reader.result(timeout=5)
+            return reader.result(timeout=OVERLAP_TIMEOUT)
 
     def test_get_for_currency_survives_concurrent_unregister(self) -> None:
         registry, entered, resume = self._pausing_registry()
