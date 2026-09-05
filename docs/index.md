@@ -8,6 +8,7 @@
 
 getting-started
 concepts
+durable-storage
 reference
 Next-major durable-state decision <adr/0001-durable-money-operations>
 changelog

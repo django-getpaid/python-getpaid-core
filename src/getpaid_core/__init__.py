@@ -12,13 +12,17 @@ from getpaid_core.enums import PaymentStatus
 from getpaid_core.exceptions import BackendNotFoundError
 from getpaid_core.exceptions import ChargeFailure
 from getpaid_core.exceptions import CommunicationError
+from getpaid_core.exceptions import ConformanceError
 from getpaid_core.exceptions import CredentialsError
 from getpaid_core.exceptions import GetPaidException
 from getpaid_core.exceptions import InvalidCallbackError
 from getpaid_core.exceptions import InvalidTransitionError
 from getpaid_core.exceptions import LockFailure
+from getpaid_core.exceptions import OperationConflictError
 from getpaid_core.exceptions import ReconciliationRequiredError
 from getpaid_core.exceptions import RefundFailure
+from getpaid_core.exceptions import StateConflictError
+from getpaid_core.exceptions import UnsupportedRepositoryError
 from getpaid_core.flow import PaymentFlow
 from getpaid_core.processor import BaseProcessor
 from getpaid_core.registry import PluginRegistry
@@ -38,6 +42,7 @@ __all__ = [
     "ChargeResult",
     "CommunicationError",
     "ConfirmationMethod",
+    "ConformanceError",
     "CredentialsError",
     "FraudEvent",
     "FraudStatus",
@@ -45,6 +50,7 @@ __all__ = [
     "InvalidCallbackError",
     "InvalidTransitionError",
     "LockFailure",
+    "OperationConflictError",
     "PaymentEvent",
     "PaymentFlow",
     "PaymentStatus",
@@ -53,7 +59,9 @@ __all__ = [
     "ReconciliationRequiredError",
     "RefundFailure",
     "RefundResult",
+    "StateConflictError",
     "TransactionResult",
+    "UnsupportedRepositoryError",
     "__version__",
     "registry",
 ]

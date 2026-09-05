@@ -171,6 +171,31 @@ class PaymentRepository(Protocol):
     async def list_by_order(self, order_id: str) -> list[Payment]: ...
 ```
 
+This is the released 3.x protocol: it takes a payment object the caller
+loaded earlier and saves it. Two independent snapshots of one payment can
+therefore overwrite each other's committed amounts.
+
+### DurablePaymentRepository Protocol
+
+```python
+class DurablePaymentRepository(Protocol):
+    async def get_payment_facts(self, payment_id: str) -> PaymentFacts: ...
+    async def reserve_operation(self, payment_id: str, intent: OperationIntent) -> OperationRecord: ...
+    async def apply_observation(self, payment_id: str, update: PaymentUpdate | None) -> ObservationPlan: ...
+    async def record_operation_outcome(
+        self, payment_id: str, operation_id: str, outcome: OperationOutcome
+    ) -> OutcomePlan: ...
+    async def get_operation(self, payment_id: str, operation_id: str) -> OperationRecord | None: ...
+    async def list_unresolved_operations(self) -> Sequence[OperationRecord]: ...
+```
+
+Every operation addresses a payment by identity, applies core's rules to
+the payment's *current* stored state, and returns committed state. When a
+repository provides all of them, `PaymentFlow` routes callbacks and
+polling through it instead of saving the caller's object. See
+[Durable Storage Contract](durable-storage.md) for the mandatory and
+optional capabilities and the upgrade boundary.
+
 ## Plugin Registry
 
 The `PluginRegistry` discovers payment backend processors via Python entry
@@ -197,6 +222,10 @@ GetPaidException
 ├── InvalidCallbackError
 ├── InvalidTransitionError
 ├── ReconciliationRequiredError
+├── UnsupportedRepositoryError
+├── StateConflictError
+├── OperationConflictError
+├── ConformanceError
 └── BackendNotFoundError (also a KeyError)
 ```
 
