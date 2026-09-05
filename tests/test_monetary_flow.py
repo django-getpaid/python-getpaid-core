@@ -8,7 +8,9 @@ import pytest
 from getpaid_core.exceptions import InvalidTransitionError
 from getpaid_core.exceptions import ReconciliationRequiredError
 from getpaid_core.flow import PaymentFlow
+from getpaid_core.fsm import apply_payment_update
 from getpaid_core.types import ChargeResult
+from getpaid_core.types import PaymentUpdate
 from getpaid_core.types import RefundResult
 from tests.conftest import MockPayment
 from tests.conftest import MockProcessor
@@ -167,9 +169,11 @@ async def test_invalid_provider_result_preserves_local_state(
     flow, calls = recording_flow
     payment = MockPayment(
         status="paid" if operation == "start_refund" else "pre-auth",
-        amount_locked=Decimal("0")
-        if operation == "start_refund"
-        else Decimal("40"),
+        amount_locked={
+            "start_refund": Decimal("0"),
+            "charge": Decimal("100"),
+            "release_lock": Decimal("40"),
+        }[operation],
         amount_paid=Decimal("100")
         if operation == "start_refund"
         else Decimal("0"),
@@ -320,3 +324,50 @@ async def test_partial_release_result_does_not_clear_full_authorization(
     assert len(calls) == 1
     assert payment.status == "pre-auth"
     assert payment.amount_locked == Decimal("100")
+
+
+@pytest.mark.asyncio
+async def test_refund_after_partial_confirmation_uses_remaining_balance(
+    recording_flow,
+):
+    flow, calls = recording_flow
+    payment = MockPayment(status="paid", amount_paid=Decimal("100"))
+    await flow.start_refund(payment, Decimal("40"))
+    apply_payment_update(
+        payment,
+        PaymentUpdate(
+            payment_event="refund_confirmed", refunded_amount=Decimal("40")
+        ),
+    )
+
+    with pytest.raises(InvalidTransitionError):
+        await flow.start_refund(payment, Decimal("61"))
+    assert calls == [("start_refund", Decimal("40"))]
+
+    await flow.start_refund(payment)
+    assert calls == [
+        ("start_refund", Decimal("40")),
+        ("start_refund", Decimal("60")),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["charge", "start_refund"])
+async def test_validator_can_replace_invalid_request_with_valid_amount(
+    recording_flow, operation
+):
+    flow, calls = recording_flow
+    payment = MockPayment(
+        status="pre-auth" if operation == "charge" else "paid",
+        amount_locked=Decimal("100") if operation == "charge" else Decimal("0"),
+        amount_paid=Decimal("0") if operation == "charge" else Decimal("100"),
+    )
+
+    def replace_amount(context):
+        context["kwargs"]["amount"] = Decimal("40")
+        return context
+
+    flow.validators = [replace_amount]
+    await getattr(flow, operation)(payment, Decimal("NaN"))
+
+    assert calls == [(operation, Decimal("40"))]
