@@ -22,6 +22,7 @@ from typing import Protocol
 from typing import cast
 from typing import runtime_checkable
 
+from getpaid_core.durable.evidence import RecoveryEvidence
 from getpaid_core.durable.records import ObservationPlan
 from getpaid_core.durable.records import OperationIntent
 from getpaid_core.durable.records import OperationOutcome
@@ -29,6 +30,7 @@ from getpaid_core.durable.records import OperationRecord
 from getpaid_core.durable.records import OutcomePlan
 from getpaid_core.durable.records import PaymentFacts
 from getpaid_core.durable.records import SubmissionPlan
+from getpaid_core.durable.resolution import OperatorResolution
 from getpaid_core.exceptions import StateConflictError
 from getpaid_core.exceptions import UnsupportedRepositoryError
 from getpaid_core.types import PaymentUpdate
@@ -94,9 +96,18 @@ class DurablePaymentRepository(Protocol):
         ...
 
     async def record_operation_outcome(
-        self, payment_id: str, operation_id: str, outcome: OperationOutcome
+        self,
+        payment_id: str,
+        operation_id: str,
+        outcome: OperationOutcome,
+        *,
+        response_attempt: int | None = None,
     ) -> OutcomePlan:
         """Record an operation outcome and its financial effects.
+
+        Pass ``response_attempt`` to ``plan_outcome``. Only a submitting
+        worker acknowledges its own claimed attempt; queries/callbacks leave
+        None so they cannot hide another producer's unrecorded response.
 
         Returns the committed operation record together with the facts it
         settled and any related operations; all commit atomically, including
@@ -106,6 +117,33 @@ class DurablePaymentRepository(Protocol):
         so a cancellation can resolve its target, refund status reflects
         outstanding work, and confirmed refunds with overlapping reservation
         baselines are counted. Passing only active records is insufficient.
+        """
+        ...
+
+    async def record_operation_failure(
+        self, payment_id: str, operation_id: str, evidence: RecoveryEvidence
+    ) -> OperationRecord:
+        """Apply ``plan_operation_failure`` to the current operation atomically.
+
+        Preserve financial facts and prior evidence. Failure here does not
+        erase the earlier durable submission; discovery must still find it.
+        """
+        ...
+
+    async def resolve_operation(
+        self,
+        payment_id: str,
+        operation_id: str,
+        resolution: OperatorResolution,
+        *,
+        expected_operation: OperationRecord,
+        expected_facts: PaymentFacts,
+    ) -> OutcomePlan:
+        """Apply ``plan_resolution`` with current facts and complete history.
+
+        Compare the operator-reviewed snapshots inside this atomic boundary.
+        Commit audit, all affected operations and facts together. Retain prior
+        disputes and recovery evidence. Authorization is the caller's duty.
         """
         ...
 
@@ -145,6 +183,8 @@ MANDATORY_OPERATIONS: tuple[str, ...] = (
     "claim_submission",
     "apply_observation",
     "record_operation_outcome",
+    "record_operation_failure",
+    "resolve_operation",
     "get_operation",
     "list_unresolved_operations",
     "list_payments_requiring_reconciliation",

@@ -16,6 +16,8 @@ from collections.abc import Iterable
 from collections.abc import Sequence
 from datetime import datetime
 
+from getpaid_core.durable.evidence import RecoveryEvidence
+from getpaid_core.durable.evidence import plan_operation_failure
 from getpaid_core.durable.records import ObservationPlan
 from getpaid_core.durable.records import OperationIntent
 from getpaid_core.durable.records import OperationOutcome
@@ -24,6 +26,8 @@ from getpaid_core.durable.records import OutcomePlan
 from getpaid_core.durable.records import PaymentFacts
 from getpaid_core.durable.records import ReplayRecord
 from getpaid_core.durable.records import SubmissionPlan
+from getpaid_core.durable.resolution import OperatorResolution
+from getpaid_core.durable.resolution import plan_resolution
 from getpaid_core.durable.rules import plan_observation
 from getpaid_core.durable.rules import plan_outcome
 from getpaid_core.durable.rules import plan_reservation
@@ -124,7 +128,12 @@ class InMemoryDurableRepository:
         )
 
     async def record_operation_outcome(
-        self, payment_id: str, operation_id: str, outcome: OperationOutcome
+        self,
+        payment_id: str,
+        operation_id: str,
+        outcome: OperationOutcome,
+        *,
+        response_attempt: int | None = None,
     ) -> OutcomePlan:
         async with self._lock_for(payment_id):
             operations = self._operations.setdefault(payment_id, [])
@@ -134,17 +143,55 @@ class InMemoryDurableRepository:
                 operations[index],
                 outcome,
                 operations=operations,
+                response_attempt=response_attempt,
             )
-            replacements = {
-                record.operation_id: record
-                for record in (plan.operation, *plan.related_operations)
-            }
-            self._operations[payment_id] = [
-                replacements.get(record.operation_id, record)
-                for record in operations
-            ]
-            self._facts[payment_id] = plan.facts
+            self._commit_outcome(payment_id, plan)
             return plan
+
+    async def record_operation_failure(
+        self, payment_id: str, operation_id: str, evidence: RecoveryEvidence
+    ) -> OperationRecord:
+        async with self._lock_for(payment_id):
+            operations = self._operations.get(payment_id, [])
+            index = self._operation_index(payment_id, operation_id, operations)
+            recorded = plan_operation_failure(operations[index], evidence)
+            operations[index] = recorded
+            return recorded
+
+    async def resolve_operation(
+        self,
+        payment_id: str,
+        operation_id: str,
+        resolution: OperatorResolution,
+        *,
+        expected_operation: OperationRecord,
+        expected_facts: PaymentFacts,
+    ) -> OutcomePlan:
+        async with self._lock_for(payment_id):
+            operations = self._operations.get(payment_id, [])
+            index = self._operation_index(payment_id, operation_id, operations)
+            plan = plan_resolution(
+                self._facts[payment_id],
+                operations[index],
+                resolution,
+                expected_operation=expected_operation,
+                expected_facts=expected_facts,
+                operations=operations,
+            )
+            self._commit_outcome(payment_id, plan)
+            return plan
+
+    def _commit_outcome(self, payment_id: str, plan: OutcomePlan) -> None:
+        """Commit a validated plan while the caller holds the payment lock."""
+        replacements = {
+            record.operation_id: record
+            for record in (plan.operation, *plan.related_operations)
+        }
+        self._operations[payment_id] = [
+            replacements.get(record.operation_id, record)
+            for record in self._operations.get(payment_id, ())
+        ]
+        self._facts[payment_id] = plan.facts
 
     async def get_operation(
         self, payment_id: str, operation_id: str
@@ -163,7 +210,9 @@ class InMemoryDurableRepository:
             record
             for records in self._operations.values()
             for record in records
-            if record.is_active or record.reconciliation_required
+            if record.is_active
+            or record.reconciliation_required
+            or record.response_pending
         )
 
     async def list_payments_requiring_reconciliation(

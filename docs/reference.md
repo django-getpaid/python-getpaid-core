@@ -48,6 +48,55 @@
    :undoc-members:
 ```
 
+## Durable Recovery and Operator Resolution
+
+These are **unreleased next-major** APIs. Released charge-specific recovery is
+unchanged; see {ref}`error migration and storage cutover <safe-evidence-and-legacy-error-migration>`.
+
+| Surface | Contract |
+|---------|----------|
+| `RecoveryEvidence` | Optional normalized `state`, finite `settled_amount`, safe `correlation` and `external_id`; missing evidence is not rejection |
+| `OperationResult.evidence` | Safe committed evidence; result repr omits snapshot metadata and frozen request parameters |
+| `OperationNotFound()` | Lookup absence, normalized by capability to unknown or conclusively excluded execution; never return it from submission |
+| `OperationEvidenceError` / `OperationPersistenceError` | Context: payment/operation IDs, operation type, safe correlation, `evidence`, `recovery_recorded`; original failure in `__cause__`; `provider_resubmission_allowed=False` |
+| `DurablePaymentFlow(..., recovery_timeout=5.0)` | Positive finite seconds for one inline local evidence-retention attempt, without shielding or detached work |
+| `OperatorResolution` | Required stable `resolution_id`, actor, reason, nonempty evidence-reference tuple, aware `resolved_at`, terminal normalized outcome; `clear_payment_reconciliation=False` |
+| `flow.resolve_operation(payment_id, operation_id, resolution, *, expected_operation, expected_facts)` | Returns `OperationResult`; atomic reviewed-state comparison, audit and financial effects, no provider I/O |
+| `plan_operation_failure(operation, evidence)` | Returns an operation with unique retained claims and a reconciliation flag; no money/state change |
+| `plan_resolution(facts, operation, resolution, *, expected_facts, expected_operation, operations)` | Returns `OutcomePlan`; requires current complete history and atomic commit of audit/facts/related operations |
+
+Outcome handles accept only `[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}`. Plugins must select
+non-secret handles; raw payloads, URLs and extra result attributes are not evidence.
+Audit strings are printable, nonempty and at most 2000 characters. Application
+access control and evidence verification are mandatory integration responsibilities.
+The original exception chain and returned snapshot are not safe logging payloads.
+
+`OperationRecord.pending_response_attempts` defaults to `()` and retains unique
+claimed attempt numbers awaiting response acknowledgement. `response_pending` is
+its derived boolean. Queries and terminal callbacks preserve all entries; discovery
+includes them regardless of settlement. `record_operation_outcome(...,
+response_attempt=N)` / `plan_outcome(..., response_attempt=N)` retire only that
+submitting worker's attempt; default None retires nothing. An audited resolution
+can retire all entries after the integration quiesces all producers. Upgrade records
+by conservatively retaining every claimed attempt lacking proven acknowledgement.
+
+`OperationRecord.recovery_evidence` and `.resolutions` default to immutable empty
+tuples. Preserve them on every write and during serialization. A repeated resolution
+ID with the same decision returns current state without duplicating money/audit;
+changed contents raise `OperationConflictError`. Stale reviewed snapshots raise
+`StateConflictError`. Invalid financial decisions raise `InvalidTransitionError`.
+Operator resolution cannot undo confirmed effects or overwrite known correlation.
+Payment-wide acknowledgement is explicit and cannot clear another operation's
+outstanding dispute. Existing evidence remains retained after resolution.
+
+```{eval-rst}
+.. automodule:: getpaid_core.durable.evidence
+   :members:
+
+.. automodule:: getpaid_core.durable.resolution
+   :members:
+```
+
 ## Durable Records
 
 The following extends the **unreleased next-major durable contract**, not the

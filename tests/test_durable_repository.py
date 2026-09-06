@@ -12,8 +12,10 @@ from getpaid_core.durable import ObservationPlan
 from getpaid_core.durable import OperationIntent
 from getpaid_core.durable import OperationOutcome
 from getpaid_core.durable import OperationRecord
+from getpaid_core.durable import OperatorResolution
 from getpaid_core.durable import OutcomePlan
 from getpaid_core.durable import PaymentFacts
+from getpaid_core.durable import RecoveryEvidence
 from getpaid_core.durable import SubmissionPlan
 from getpaid_core.durable import commit_semantic_transition
 from getpaid_core.durable import missing_durable_operations
@@ -54,7 +56,28 @@ class ConformingRepository:
         raise NotImplementedError
 
     async def record_operation_outcome(
-        self, payment_id: str, operation_id: str, outcome: OperationOutcome
+        self,
+        payment_id: str,
+        operation_id: str,
+        outcome: OperationOutcome,
+        *,
+        response_attempt: int | None = None,
+    ) -> OutcomePlan:
+        raise NotImplementedError
+
+    async def record_operation_failure(
+        self, payment_id: str, operation_id: str, evidence: RecoveryEvidence
+    ) -> OperationRecord:
+        raise NotImplementedError
+
+    async def resolve_operation(
+        self,
+        payment_id: str,
+        operation_id: str,
+        resolution: OperatorResolution,
+        *,
+        expected_facts: PaymentFacts,
+        expected_operation: OperationRecord,
     ) -> OutcomePlan:
         raise NotImplementedError
 

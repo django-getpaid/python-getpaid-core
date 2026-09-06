@@ -18,6 +18,7 @@ from getpaid_core.types import TransactionResult
 
 if TYPE_CHECKING:
     from getpaid_core.durable.provider import OperationCapabilities
+    from getpaid_core.durable.provider import OperationNotFound
     from getpaid_core.durable.records import OperationOutcome
     from getpaid_core.durable.records import OperationRecord
     from getpaid_core.durable.records import OperationType
@@ -62,10 +63,10 @@ class BaseProcessor(ABC):
     @classmethod
     async def lookup_operation(
         cls, operation: "OperationRecord", *, config: Mapping[str, Any]
-    ) -> "OperationOutcome":
+    ) -> "OperationOutcome | OperationNotFound":
         """Query evidence tied to this operation, not an arbitrary active one.
 
-        Ordinary not-found is UNKNOWN unless the declared lookup contract
+        Return OperationNotFound for absence. It is UNKNOWN unless the contract
         conclusively excludes execution. Delta-only uncorrelated evidence must
         return UNKNOWN with reconciliation_required, never guessed totals.
         """

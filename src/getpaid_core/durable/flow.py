@@ -26,8 +26,12 @@ from datetime import timedelta
 from time import monotonic
 from typing import Any
 
+from getpaid_core.durable.evidence import RecoveryEvidence
+from getpaid_core.durable.evidence import normalize_outcome
+from getpaid_core.durable.evidence import safe_handle
 from getpaid_core.durable.provider import LookupSemantics
 from getpaid_core.durable.provider import OperationCapabilities
+from getpaid_core.durable.provider import OperationNotFound
 from getpaid_core.durable.provider import OperationResult
 from getpaid_core.durable.records import ObservationPlan
 from getpaid_core.durable.records import OperationIntent
@@ -36,8 +40,10 @@ from getpaid_core.durable.records import OperationRecord
 from getpaid_core.durable.records import OperationState
 from getpaid_core.durable.records import OperationType
 from getpaid_core.durable.records import OutcomePlan
+from getpaid_core.durable.records import PaymentFacts
 from getpaid_core.durable.repository import DurablePaymentRepository
 from getpaid_core.durable.repository import require_durable_state
+from getpaid_core.durable.resolution import OperatorResolution
 from getpaid_core.exceptions import CommunicationError
 from getpaid_core.exceptions import InvalidTransitionError
 from getpaid_core.exceptions import OperationConflictError
@@ -63,6 +69,7 @@ class DurablePaymentFlow(BaseFlow):
         *,
         restricted_operations: frozenset[OperationType] = frozenset(),
         provider_timeout: float = 30.0,
+        recovery_timeout: float = 5.0,
     ) -> None:
         super().__init__(
             require_durable_state(repository, operation="durable payment flow"),
@@ -75,6 +82,9 @@ class DurablePaymentFlow(BaseFlow):
         if not 0 < provider_timeout < float("inf"):
             raise ValueError("provider_timeout must be positive and finite.")
         self.provider_timeout = provider_timeout
+        if not 0 < recovery_timeout < float("inf"):
+            raise ValueError("recovery_timeout must be positive and finite.")
+        self.recovery_timeout = recovery_timeout
 
     def _capability(
         self, processor: Any, operation_type: OperationType
@@ -197,37 +207,97 @@ class DurablePaymentFlow(BaseFlow):
         return await self._record_evidence(operation, outcome)
 
     async def _record_evidence(
-        self, operation: OperationRecord, outcome: OperationOutcome
+        self,
+        operation: OperationRecord,
+        outcome: object,
+        *,
+        submission_response: bool = True,
     ) -> OperationResult:
-        context = {
+        evidence = RecoveryEvidence.from_outcome(outcome)
+        context: dict[str, object] = {
             "payment_id": operation.payment_id,
             "operation_id": operation.operation_id,
             "operation_type": operation.operation_type.value,
-            "correlation": operation.correlation,
+            "correlation": evidence.correlation
+            or safe_handle(operation.correlation),
+            "evidence": evidence,
         }
-        if not isinstance(outcome, OperationOutcome):
-            raise OperationEvidenceError(
-                "Processor must return a normalized OperationOutcome.",
-                context=context,
-            )
-        if isinstance(outcome.correlation, str):
-            context["correlation"] = outcome.correlation
         try:
+            if not isinstance(outcome, OperationOutcome):
+                raise InvalidTransitionError(
+                    "Processor must return a normalized OperationOutcome."
+                )
+            outcome = normalize_outcome(outcome)
             plan = await self.repository.record_operation_outcome(
-                operation.payment_id, operation.operation_id, outcome
+                operation.payment_id,
+                operation.operation_id,
+                outcome,
+                response_attempt=(
+                    operation.submission_attempts
+                    if submission_response
+                    else None
+                ),
             )
         except (InvalidTransitionError, OperationConflictError) as exc:
+            context["recovery_recorded"] = await self._retain_failure(
+                operation, evidence
+            )
             raise OperationEvidenceError(
                 "Provider evidence could not be applied; "
                 "reconcile the durable intent.",
                 context=context,
             ) from exc
         except Exception as exc:
+            context["recovery_recorded"] = await self._retain_failure(
+                operation, evidence
+            )
             raise OperationPersistenceError(
                 "Operation evidence could not be committed; reconcile the "
                 "durable intent before any further submission.",
                 context=context,
             ) from exc
+        return OperationResult(plan.operation, plan.facts)
+
+    async def _retain_failure(
+        self, operation: OperationRecord, evidence: RecoveryEvidence
+    ) -> bool:
+        """Best effort, bounded local retention; the original error wins.
+
+        Secondary storage errors are deliberately represented by False, not
+        logged with potentially sensitive messages. No task is detached or
+        shielded here. Cancellation cleanup is a separate contract.
+        """
+        try:
+            async with asyncio.timeout(self.recovery_timeout):
+                await self.repository.record_operation_failure(
+                    operation.payment_id, operation.operation_id, evidence
+                )
+        except Exception:
+            return False
+        return True
+
+    async def resolve_operation(
+        self,
+        payment_id: str,
+        operation_id: str,
+        resolution: OperatorResolution,
+        *,
+        expected_operation: OperationRecord,
+        expected_facts: PaymentFacts,
+    ) -> OperationResult:
+        """Commit an authorized operator decision; never contact the provider.
+
+        The application supplies the reviewed snapshots and enforces access
+        control. Stale decisions conflict; local commit failures propagate
+        without inventing a committed result. Retry the same resolution ID.
+        """
+        plan = await self.repository.resolve_operation(
+            payment_id,
+            operation_id,
+            resolution,
+            expected_operation=expected_operation,
+            expected_facts=expected_facts,
+        )
         return OperationResult(plan.operation, plan.facts)
 
     async def reconcile_operation(
@@ -257,8 +327,9 @@ class DurablePaymentFlow(BaseFlow):
             )
         if (
             not operation.is_active
-            or operation.state is OperationState.RESERVED
-        ):
+            and not operation.reconciliation_required
+            and not operation.response_pending
+        ) or operation.state is OperationState.RESERVED:
             return await self._operation_result(operation)
         processor = self.registry.get_by_slug(operation.backend)
         capability = self._capability(processor, operation.operation_type)
@@ -272,7 +343,16 @@ class DurablePaymentFlow(BaseFlow):
             except (TimeoutError, CommunicationError):
                 # A failed query cannot erase previously established acceptance.
                 return await self._operation_result(operation)
-            result = await self._record_evidence(operation, outcome)
+            if type(outcome) is OperationNotFound:
+                outcome = OperationOutcome(
+                    OperationState.REJECTED
+                    if capability.lookup_semantics
+                    is LookupSemantics.AUTHORITATIVE_INCLUDING_ABSENCE
+                    else OperationState.UNKNOWN
+                )
+            result = await self._record_evidence(
+                operation, outcome, submission_response=False
+            )
             operation = result.operation
         result = await self._operation_result(operation)
         current_time = now + timedelta(seconds=monotonic() - started)

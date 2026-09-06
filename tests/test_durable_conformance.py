@@ -19,6 +19,27 @@ from getpaid_core.exceptions import ConformanceError
 from getpaid_core.types import PaymentUpdate
 
 
+async def test_suite_detects_callback_erasing_response_discovery():
+    from getpaid_core.durable.conformance import (
+        check_callback_cannot_retire_response,
+    )
+
+    class ErasingRepository(InMemoryDurableRepository):
+        async def apply_observation(self, *args):
+            plan = await super().apply_observation(*args)
+            self._operations[plan.facts.payment_id] = [
+                replace(record, pending_response_attempts=())
+                for record in self._operations[plan.facts.payment_id]
+            ]
+            return plan
+
+    async def factory(facts):
+        return ErasingRepository([facts])
+
+    with pytest.raises(ConformanceError, match="response"):
+        await check_callback_cannot_retire_response(factory)
+
+
 async def in_memory_factory(facts: PaymentFacts) -> InMemoryDurableRepository:
     return InMemoryDurableRepository([facts])
 
@@ -77,6 +98,8 @@ def test_the_suite_has_checks_for_every_required_race():
         "submission_right_is_exclusive",
         "conflicting_outcomes_are_retained",
         "observations_commit_operations_and_disputes",
+        "recovery_and_resolution_are_retained",
+        "callback_cannot_retire_response",
     }
 
 
@@ -91,7 +114,9 @@ async def test_conformance_rejects_dropped_observation_operations():
     async def factory(facts):
         return DroppedOperations([facts])
 
-    with pytest.raises(ConformanceError, match="observations_commit_operations"):
+    with pytest.raises(
+        ConformanceError, match="observations_commit_operations"
+    ):
         await run_conformance_suite(factory)
 
 

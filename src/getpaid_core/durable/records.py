@@ -19,7 +19,13 @@ from decimal import Decimal
 from enum import StrEnum
 from hashlib import sha256
 from types import MappingProxyType
+from typing import TYPE_CHECKING
 from typing import Any
+
+
+if TYPE_CHECKING:
+    from getpaid_core.durable.evidence import RecoveryEvidence
+    from getpaid_core.durable.resolution import OperatorResolution
 
 from getpaid_core.enums import FraudStatus
 from getpaid_core.enums import PaymentStatus
@@ -445,18 +451,34 @@ class OperationRecord:
     idempotency_key: str = field(init=False)
     submitted_at: datetime | None = None
     submission_attempts: int = 0
+    pending_response_attempts: tuple[int, ...] = ()
     retry_until: datetime | None = None
     idempotency_scope: str | None = None
     settled_amount: Decimal | None = None
     correlation: str | None = None
     reconciliation_required: bool = False
     conflicting_outcomes: tuple["OperationOutcome", ...] = ()
+    recovery_evidence: tuple["RecoveryEvidence", ...] = ()
+    resolutions: tuple["OperatorResolution", ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
             self, "operation_type", OperationType(self.operation_type)
         )
         object.__setattr__(self, "state", OperationState(self.state))
+        if (
+            type(self.pending_response_attempts) is not tuple
+            or any(
+                type(attempt) is not int
+                or not 0 < attempt <= self.submission_attempts
+                for attempt in self.pending_response_attempts
+            )
+            or len(set(self.pending_response_attempts))
+            != len(self.pending_response_attempts)
+        ):
+            raise InvalidTransitionError(
+                "Pending response attempts must be unique claimed attempts."
+            )
         _validate_operation_id(self.operation_id)
         object.__setattr__(
             self, "parameters", freeze_parameters(self.parameters)
@@ -466,6 +488,11 @@ class OperationRecord:
             "idempotency_key",
             _request_digest([self.backend, self.payment_id, self.operation_id]),
         )
+
+    @property
+    def response_pending(self) -> bool:
+        """Whether any claimed submission still owes response recording."""
+        return bool(self.pending_response_attempts)
 
     @property
     def is_active(self) -> bool:

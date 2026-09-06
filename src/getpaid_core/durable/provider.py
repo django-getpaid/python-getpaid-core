@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from datetime import timedelta
 from enum import StrEnum
 
+from getpaid_core.durable.evidence import RecoveryEvidence
+from getpaid_core.durable.evidence import safe_handle
 from getpaid_core.durable.records import OperationRecord
 from getpaid_core.durable.records import OperationState
 from getpaid_core.durable.records import PaymentFacts
@@ -64,6 +66,16 @@ class OperationCapabilities:
 
 
 @dataclass(frozen=True, slots=True)
+class OperationNotFound:
+    """An operation query found no record; the capability defines its meaning.
+
+    This is not a rejection. Only AUTHORITATIVE_INCLUDING_ABSENCE proves the
+    intent neither executed nor can execute later. Other lookup contracts
+    leave it UNKNOWN; elapsed time is irrelevant.
+    """
+
+
+@dataclass(frozen=True, slots=True)
 class OperationResult:
     """A durable operation's outcome, never an implication of settlement.
 
@@ -74,6 +86,22 @@ class OperationResult:
 
     operation: OperationRecord
     snapshot: PaymentFacts
+
+    def __repr__(self) -> str:
+        return (
+            f"OperationResult(outcome={self.outcome.value!r}, "
+            f"reconciliation_required={self.reconciliation_required!r})"
+        )
+
+    @property
+    def evidence(self) -> RecoveryEvidence:
+        """Allowlisted committed fields, not the snapshot's plugin metadata."""
+        return RecoveryEvidence(
+            state=self.outcome,
+            settled_amount=self.operation.settled_amount,
+            correlation=safe_handle(self.operation.correlation),
+            external_id=safe_handle(self.snapshot.external_id),
+        )
 
     @property
     def operation_id(self) -> str:
