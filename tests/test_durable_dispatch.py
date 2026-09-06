@@ -475,6 +475,46 @@ async def test_ineligible_or_corrupt_current_facts_are_refused_before_io(
     assert await repository.get_operation("pay", "bad") is None
 
 
+@pytest.mark.parametrize("slow_attempt", [0, 1], ids=["initial", "retry"])
+@pytest.mark.parametrize("claim_seconds", [40, 62], ids=["insufficient-call-budget", "expired"])
+async def test_slow_claim_cannot_submit_outside_idempotency_window(
+    monkeypatch, slow_attempt, claim_seconds
+):
+    from getpaid_core.durable import OperationCapabilities
+
+    elapsed = [0.0]
+    monkeypatch.setattr("getpaid_core.durable.flow.monotonic", lambda: elapsed[0])
+    calls = []
+
+    class Recording(MockProcessor):
+        operation_capabilities = {OperationType.CHARGE: OperationCapabilities(
+            idempotency_scope="merchant", idempotency_window=timedelta(seconds=60))}
+
+        @classmethod
+        async def submit_operation(cls, operation, *, config):
+            calls.append(operation)
+            raise TimeoutError
+
+    class SlowClaim(InMemoryDurableRepository):
+        async def claim_submission(self, *args, **kwargs):
+            claim = await super().claim_submission(*args, **kwargs)
+            if kwargs["expected_attempt"] == slow_attempt:
+                elapsed[0] += claim_seconds
+            return claim
+
+    repository = SlowClaim([PaymentFacts(
+        "pay", Decimal("100"), backend=Recording.slug,
+        remaining_authorization=Decimal("100"), status="pre-auth")])
+    _, flow = make_flow(Recording, repository=repository)
+    result = await flow.execute_operation("pay", OperationIntent("capture", OperationType.CHARGE), now=NOW)
+    if slow_attempt:
+        result = await flow.reconcile_operation("pay", "capture", now=NOW, resubmit=True)
+    assert len(calls) == slow_attempt
+    assert result.outcome is OperationState.SUBMITTING
+    assert result.snapshot.captured_funds == 0
+    assert len(await repository.list_unresolved_operations()) == 1
+
+
 def make_flow(processor, *, repository=None, **options):
     registry = PluginRegistry()
     registry._discovered = True

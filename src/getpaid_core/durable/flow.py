@@ -122,6 +122,7 @@ class DurablePaymentFlow(BaseFlow):
         Retrying an uncertain intent does not dispatch it: call
         ``reconcile_operation`` explicitly to query evidence first.
         """
+        started = monotonic()
         if now.tzinfo is None or now.utcoffset() is None:
             raise ValueError("now must be timezone-aware.")
         facts = await self.repository.get_payment_facts(payment_id)
@@ -163,11 +164,21 @@ class DurablePaymentFlow(BaseFlow):
         )
         if not claim.granted:
             return await self._operation_result(claim.operation)
-        return await self._submit(processor, claim.operation)
+        return await self._submit(
+            processor, claim.operation, capability, now=now, started=started
+        )
 
     async def _submit(
-        self, processor: Any, operation: OperationRecord
+        self, processor: Any, operation: OperationRecord,
+        capability: OperationCapabilities, *, now: datetime, started: float,
     ) -> OperationResult:
+        # Claim acknowledgement may have consumed the entire key lifetime.
+        # Recheck after every local await, immediately before provider I/O.
+        current_time = now + timedelta(seconds=monotonic() - started)
+        if operation.retry_until is not None and not self._within_submission_window(
+            operation, capability, current_time
+        ):
+            return await self._operation_result(operation)
         try:
             async with asyncio.timeout(self.provider_timeout):
                 outcome = await processor.submit_operation(
@@ -269,7 +280,9 @@ class DurablePaymentFlow(BaseFlow):
         )
         if not claim.granted:
             return await self._operation_result(claim.operation)
-        return await self._submit(processor, claim.operation)
+        return await self._submit(
+            processor, claim.operation, capability, now=now, started=started
+        )
 
     def _retry_is_safe(
         self,
@@ -282,7 +295,16 @@ class DurablePaymentFlow(BaseFlow):
             result.reconciliation_required
             or operation.state
             not in {OperationState.UNKNOWN, OperationState.SUBMITTING}
-            or operation.submitted_at is None
+        ):
+            return False
+        return self._within_submission_window(operation, capability, now)
+
+    def _within_submission_window(
+        self, operation: OperationRecord, capability: OperationCapabilities,
+        now: datetime,
+    ) -> bool:
+        if (
+            operation.submitted_at is None
             or operation.retry_until is None
             or capability.idempotency_window is None
             or capability.idempotency_scope != operation.idempotency_scope
