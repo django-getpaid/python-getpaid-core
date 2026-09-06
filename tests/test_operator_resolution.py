@@ -13,6 +13,7 @@ from getpaid_core.durable import OperationType
 from getpaid_core.durable import OperatorResolution
 from getpaid_core.durable import PaymentFacts
 from getpaid_core.durable import PaymentObservation
+from getpaid_core.enums import PaymentEvent
 from getpaid_core.enums import PaymentStatus
 from getpaid_core.exceptions import InvalidTransitionError
 from getpaid_core.exceptions import OperationConflictError
@@ -368,6 +369,29 @@ async def test_settlement_correction_cannot_reuse_baseline_after_later_intents(
     assert await repository.get_payment_facts("pay") == facts
     assert await repository.get_operation("pay", "partial") == operation
     assert await repository.get_operation("pay", "later") == later
+
+
+async def test_refund_correction_preserves_unrelated_external_refund_progress():
+    repository = await partial_settlement(OperationType.START_REFUND)
+    pending = await repository.apply_observation(
+        "pay", PaymentObservation(payment_event=PaymentEvent.REFUND_REQUESTED)
+    )
+    assert pending.facts.status == PaymentStatus.REFUND_STARTED
+    operation = await repository.get_operation("pay", "partial")
+    resolution = decision()
+    result = await repository.resolve_operation(
+        "pay",
+        "partial",
+        resolution,
+        expected_facts=pending.facts,
+        expected_operation=operation,
+    )
+    assert result.facts.refunded_funds == Decimal("40")
+    assert result.facts.captured_funds == Decimal("100")
+    assert result.facts.status == PaymentStatus.REFUND_STARTED
+    assert result.operation.settled_amount == Decimal("30")
+    assert result.operation.resolutions == (resolution,)
+    assert await repository.get_payment_facts("pay") == result.facts
 
 
 async def test_resolution_cannot_erase_confirmed_effects_or_reuse_audit_identity():

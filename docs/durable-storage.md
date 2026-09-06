@@ -391,7 +391,9 @@ ends at captured=30, hold=70. A cumulative observation that already recorded tha
 money is not counted twice. The superseded successful amount/correlation is retained
 in `conflicting_outcomes`, alongside existing disputes and the new resolution audit.
 Ordinary provider outcomes still flag terminal discrepancies rather than correcting
-them automatically.
+them automatically. Correcting a completed intent's amount preserves an existing
+refund-in-progress marker: it does not resolve unrelated externally initiated work,
+even when that work has no local operation reservation.
 
 Neither an upward settlement correction nor changing a rejected operation to
 succeeded is allowed after any later intent was reserved: the old starting totals

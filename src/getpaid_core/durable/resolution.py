@@ -18,6 +18,7 @@ from getpaid_core.durable.records import OutcomePlan
 from getpaid_core.durable.records import PaymentFacts
 from getpaid_core.durable.rules import _FactsPayment
 from getpaid_core.durable.rules import plan_outcome
+from getpaid_core.enums import PaymentStatus
 from getpaid_core.exceptions import InvalidTransitionError
 from getpaid_core.exceptions import OperationConflictError
 from getpaid_core.exceptions import StateConflictError
@@ -204,6 +205,13 @@ def plan_resolution(
     if plan.operation.reconciliation_required:
         raise InvalidTransitionError(
             "Resolution conflicts with financial facts or correlation."
+        )
+    if correcting_settlement and facts.status == PaymentStatus.REFUND_STARTED:
+        # A completed intent no longer owns the pending-refund marker. Its
+        # corrected amount cannot resolve later externally initiated work,
+        # which may have no local reservation in the retained history.
+        plan = replace(
+            plan, facts=replace(plan.facts, status=PaymentStatus.REFUND_STARTED)
         )
     recorded = replace(
         plan.operation,
