@@ -217,6 +217,36 @@ def test_conflicting_outcome_retains_recoverable_evidence(disputed):
     assert completed.operation.conflicting_outcomes == ()
 
 
+async def test_disputed_prepare_handles_survive_repeated_delivery_and_reads():
+    facts = PaymentFacts(payment_id="payment-1", amount_required=Decimal("100"))
+    repository = InMemoryDurableRepository([facts])
+    await repository.reserve_operation(
+        "payment-1", OperationIntent("prepare-1", OperationType.PREPARE)
+    )
+    completed = await repository.record_operation_outcome(
+        "payment-1",
+        "prepare-1",
+        OperationOutcome(OperationState.SUCCEEDED, external_id="order-1"),
+    )
+    disputed = tuple(
+        OperationOutcome(OperationState.SUCCEEDED, external_id=handle)
+        for handle in ("order-2", "order-3")
+    )
+    for outcome in (*disputed, *disputed):
+        await repository.record_operation_outcome(
+            "payment-1", "prepare-1", outcome
+        )
+
+    stored = await repository.get_operation("payment-1", "prepare-1")
+    assert stored.conflicting_outcomes == disputed
+    assert stored.state is OperationState.SUCCEEDED
+    assert stored.reconciliation_required
+    assert await repository.get_payment_facts("payment-1") == replace(
+        completed.facts, reconciliation_required=True
+    )
+    assert await repository.list_unresolved_operations() == (stored,)
+
+
 def test_conflicting_correlation_never_settles_another_provider_operation():
     facts = authorized_facts()
     operation = plan_reservation(

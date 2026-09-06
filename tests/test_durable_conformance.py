@@ -75,6 +75,7 @@ def test_the_suite_has_checks_for_every_required_race():
         "malformed_metadata_is_rejected_atomically",
         "reconciliation_blocks_new_commands",
         "submission_right_is_exclusive",
+        "conflicting_outcomes_are_retained",
     }
 
 
@@ -101,6 +102,25 @@ async def test_conformance_rejects_an_adapter_granting_duplicate_submission_righ
         return DuplicateClaims([facts])
 
     with pytest.raises(ConformanceError, match="submission_right_is_exclusive"):
+        await run_conformance_suite(factory)
+
+
+async def test_conformance_rejects_an_adapter_discarding_conflicting_evidence():
+    class DiscardingEvidence(InMemoryDurableRepository):
+        async def record_operation_outcome(self, *args, **kwargs):
+            plan = await super().record_operation_outcome(*args, **kwargs)
+            self._operations[plan.operation.payment_id] = [
+                replace(record, conflicting_outcomes=())
+                for record in self._operations[plan.operation.payment_id]
+            ]
+            return plan
+
+    async def factory(facts):
+        return DiscardingEvidence([facts])
+
+    with pytest.raises(
+        ConformanceError, match="conflicting_outcomes_are_retained"
+    ):
         await run_conformance_suite(factory)
 
 

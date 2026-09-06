@@ -619,7 +619,8 @@ def plan_outcome(
             reconciliation_required=outcome.reconciliation_required,
             external_id=outcome.external_id,
         )
-        conflicts = (*conflicts, evidence)
+        if evidence not in conflicts:
+            conflicts = (*conflicts, evidence)
     recorded = replace(
         operation,
         correlation=operation.correlation or outcome.correlation,

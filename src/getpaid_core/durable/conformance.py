@@ -33,6 +33,7 @@ exercise.
 import asyncio
 from collections.abc import Awaitable
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
@@ -249,6 +250,66 @@ async def check_unresolved_operations_are_discoverable(
     _require(
         all(record.operation_id != "op-1" for record in unresolved),
         "a settled operation is still reported as unresolved work",
+    )
+
+
+async def check_conflicting_outcomes_are_retained(
+    factory: RepositoryFactory,
+) -> None:
+    """Distinct disputes survive concurrent writes, reads and redelivery."""
+    repository = await factory(_authorized_facts())
+    await repository.reserve_operation(
+        PAYMENT_ID,
+        OperationIntent("op-1", OperationType.CHARGE, amount=Decimal("40")),
+    )
+    confirmed = OperationOutcome(
+        OperationState.SUCCEEDED, Decimal("20"), "capture-1"
+    )
+    completed = await repository.record_operation_outcome(
+        PAYMENT_ID, "op-1", confirmed
+    )
+    disputed = (
+        OperationOutcome(OperationState.SUCCEEDED, Decimal("30"), "capture-1"),
+        OperationOutcome(OperationState.SUCCEEDED, Decimal("40"), "capture-1"),
+        OperationOutcome(OperationState.SUCCEEDED, Decimal("20"), "capture-2"),
+        OperationOutcome(OperationState.REJECTED, correlation="capture-1"),
+    )
+    await asyncio.gather(
+        *(
+            repository.record_operation_outcome(PAYMENT_ID, "op-1", evidence)
+            for evidence in disputed
+        )
+    )
+    for evidence in (*disputed, confirmed):
+        await repository.record_operation_outcome(PAYMENT_ID, "op-1", evidence)
+
+    stored = await repository.get_operation(PAYMENT_ID, "op-1")
+    _require(stored is not None, "the disputed operation was lost")
+    assert stored is not None
+    _require(
+        len(stored.conflicting_outcomes) == len(disputed)
+        and all(
+            evidence in stored.conflicting_outcomes for evidence in disputed
+        ),
+        "distinct conflicting outcomes were lost or duplicated in storage",
+    )
+    _require(
+        stored
+        == replace(
+            completed.operation,
+            reconciliation_required=True,
+            conflicting_outcomes=stored.conflicting_outcomes,
+        ),
+        "conflicting evidence overwrote established operation facts",
+    )
+    facts = await repository.get_payment_facts(PAYMENT_ID)
+    _require(
+        facts == replace(completed.facts, reconciliation_required=True),
+        "conflicting evidence changed financial facts or lost reconciliation",
+    )
+    _require(
+        stored in await repository.list_unresolved_operations(),
+        "the disputed terminal operation is not discoverable",
     )
 
 
@@ -499,6 +560,10 @@ CONFORMANCE_CHECKS: tuple[
     (
         "unresolved_operations_are_discoverable",
         check_unresolved_operations_are_discoverable,
+    ),
+    (
+        "conflicting_outcomes_are_retained",
+        check_conflicting_outcomes_are_retained,
     ),
     (
         "reconciliation_flags_are_enumerable",
