@@ -186,6 +186,12 @@ def test_late_evidence_preserves_terminal_money_and_flags_contradictions(
     "disputed",
     [
         OperationOutcome(OperationState.SUCCEEDED, Decimal("30"), "capture-1"),
+        OperationOutcome(
+            OperationState.SUCCEEDED,
+            Decimal("30"),
+            "capture-1",
+            reconciliation_required=True,
+        ),
         OperationOutcome(OperationState.SUCCEEDED, Decimal("40"), "capture-1"),
         OperationOutcome(OperationState.SUCCEEDED, Decimal("20"), "capture-2"),
         OperationOutcome(OperationState.SUCCEEDED, Decimal("20"), "capture-3"),
@@ -215,6 +221,42 @@ def test_conflicting_outcome_retains_recoverable_evidence(disputed):
         completed.facts, reconciliation_required=True
     )
     assert completed.operation.conflicting_outcomes == ()
+
+
+@pytest.mark.parametrize(
+    "flag", [{}, [], {"raw": "secret"}, 0, 1, "true", None]
+)
+async def test_malformed_reconciliation_flag_cannot_enter_stored_evidence(flag):
+    repository = InMemoryDurableRepository([authorized_facts()])
+    await repository.reserve_operation(
+        "payment-1", charge_intent(amount=Decimal("40"))
+    )
+    completed = await repository.record_operation_outcome(
+        "payment-1",
+        "charge-1",
+        OperationOutcome(OperationState.SUCCEEDED, Decimal("20"), "capture-1"),
+    )
+    disputed = OperationOutcome(
+        OperationState.SUCCEEDED,
+        Decimal("30"),
+        "capture-1",
+        reconciliation_required=flag,
+    )
+
+    with pytest.raises(InvalidTransitionError, match="must be a boolean"):
+        await repository.record_operation_outcome(
+            "payment-1", "charge-1", disputed
+        )
+    if isinstance(flag, dict):
+        flag["later_payload"] = "must not enter storage"
+    elif isinstance(flag, list):
+        flag.append("must not enter storage")
+
+    assert (
+        await repository.get_operation("payment-1", "charge-1")
+        == completed.operation
+    )
+    assert await repository.get_payment_facts("payment-1") == completed.facts
 
 
 async def test_disputed_prepare_handles_survive_repeated_delivery_and_reads():

@@ -536,6 +536,10 @@ def plan_outcome(
     bound even when cancellation let their reservation baselines overlap.
     """
     operations = tuple(operations)
+    if type(outcome.reconciliation_required) is not bool:
+        raise InvalidTransitionError(
+            "Outcome reconciliation_required must be a boolean."
+        )
     for name in ("correlation", "external_id"):
         value = getattr(outcome, name)
         if value is not None and (

@@ -60,7 +60,9 @@ contradicts an established terminal state/amount, operation correlation, or
 payment external ID, `plan_outcome` retains its allowlisted fields: `state`,
 `settled_amount`, `correlation`, `external_id`, and `reconciliation_required`.
 It stores neither raw provider payloads nor additional plugin attributes.
-An omitted settled amount retains its meaning against the frozen reservation.
+The reconciliation flag must be an actual boolean; malformed values are rejected
+before any state is committed. An omitted settled amount retains its meaning
+against the frozen reservation.
 
 Commit this tuple with the operation, payment facts and reconciliation flags
 in the same `record_operation_outcome()` boundary. Distinct disputed values
