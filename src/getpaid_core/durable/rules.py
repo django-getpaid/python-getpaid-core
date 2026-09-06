@@ -469,6 +469,40 @@ def _settlement_update(
     )
 
 
+def _confirmed_refund_total(
+    operation: OperationRecord, settled: Decimal,
+    operations: Iterable[OperationRecord],
+) -> Decimal:
+    """A cumulative lower bound proved by distinct confirmed refund intents.
+
+    A cancelled refund can settle after a later refund reserved the same
+    starting balance. Their per-intent cumulative baselines overlap, but their
+    confirmed returned funds do not. Count each durable intent once above the
+    earliest reserved baseline. Compare this with observations, never add it
+    to current facts: a callback may already contain the same returned money.
+    The complete retained operation history is required for this proof.
+    """
+    refunds = [
+        record for record in operations
+        if record.payment_id == operation.payment_id
+        and record.operation_type is OperationType.START_REFUND
+        and record.operation_id != operation.operation_id
+    ]
+    baseline = min(
+        (record.starting_refunded for record in refunds),
+        default=operation.starting_refunded,
+    )
+    baseline = min(baseline, operation.starting_refunded)
+    confirmed = sum(
+        (record.settled_amount for record in refunds
+         if record.state is OperationState.SUCCEEDED
+         and record.settled_amount is not None),
+        start=Decimal("0"),
+    )
+    return max(operation.starting_refunded + settled,
+               baseline + confirmed + settled)
+
+
 def plan_outcome(
     facts: PaymentFacts,
     operation: OperationRecord,
@@ -591,6 +625,11 @@ def plan_outcome(
     related: tuple[OperationRecord, ...] = ()
     if outcome.state is OperationState.SUCCEEDED:
         update = _settlement_update(operation, outcome)
+        if operation.operation_type is OperationType.START_REFUND:
+            assert settled is not None  # validated by _settlement_update
+            update = replace(update, refunded_amount=_confirmed_refund_total(
+                operation, settled, operations
+            ))
         if operation.operation_type is OperationType.CANCEL_REFUND:
             target_id = operation.parameters.get(CANCELLATION_TARGET)
             target = next(

@@ -577,6 +577,48 @@ async def test_crash_after_claim_before_transmission_cannot_be_blindly_retried(
     assert len(await repository.list_unresolved_operations()) == 1
 
 
+@pytest.mark.parametrize("historical_refunded", [Decimal("0"), Decimal("20")])
+@pytest.mark.parametrize("late_first", [False, True])
+@pytest.mark.parametrize("callback_before_response", [False, True])
+async def test_late_cancelled_refund_and_distinct_refund_are_both_counted(
+    historical_refunded, late_first, callback_before_response
+):
+    repository = InMemoryDurableRepository([PaymentFacts(
+        "payment", Decimal("100"), backend=MockProcessor.slug,
+        captured_funds=Decimal("100"), refunded_funds=historical_refunded,
+        status="partially_refunded" if historical_refunded else "paid",
+    )])
+    await repository.reserve_operation("payment", OperationIntent(
+        "r1", OperationType.START_REFUND, amount=Decimal("30")))
+    await repository.record_operation_outcome("payment", "r1", OperationOutcome(
+        OperationState.PROVIDER_PENDING, correlation="refund-1"))
+    await repository.reserve_operation("payment", OperationIntent(
+        "cancel", OperationType.CANCEL_REFUND,
+        parameters={"target_operation_id": "r1"}))
+    await repository.record_operation_outcome("payment", "cancel", OperationOutcome(
+        OperationState.SUCCEEDED, correlation="cancel-1"))
+    await repository.reserve_operation("payment", OperationIntent(
+        "r2", OperationType.START_REFUND, amount=Decimal("30")))
+    late = OperationOutcome(OperationState.SUCCEEDED, correlation="refund-1")
+    second = OperationOutcome(OperationState.SUCCEEDED, correlation="refund-2")
+    if callback_before_response:
+        await repository.apply_observation("payment", PaymentUpdate(
+            payment_event=PaymentEvent.REFUND_CONFIRMED,
+            refunded_amount=historical_refunded + Decimal("30"),
+        ))
+    if late_first:
+        await repository.record_operation_outcome("payment", "r1", late)
+    await repository.record_operation_outcome("payment", "r2", second)
+    await repository.record_operation_outcome("payment", "r1", late)
+    await repository.record_operation_outcome("payment", "r2", second)
+    facts = await repository.get_payment_facts("payment")
+    assert facts.refunded_funds == historical_refunded + Decimal("60")
+    assert facts.captured_funds == Decimal("100")
+    assert facts.reconciliation_required is True
+    assert (await repository.get_operation("payment", "r1")).settled_amount == Decimal("30")
+    assert (await repository.get_operation("payment", "r2")).settled_amount == Decimal("30")
+
+
 @pytest.mark.parametrize(
     "settled_amount", [Decimal("30"), Decimal("100")], ids=["partial", "full"]
 )
