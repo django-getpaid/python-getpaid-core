@@ -127,3 +127,43 @@ async def test_post_provider_failure_retains_normalized_evidence_and_intent(
     )
     await flow.execute_operation("pay", intent, now=NOW)
     assert len(calls) == 1
+
+
+async def test_operator_resolution_commits_audit_with_settlement_and_no_submission():
+    from getpaid_core.durable import OperatorResolution
+
+    repository, flow, intent, calls = await recovery_flow(
+        OperationType.CHARGE, OperationOutcome(OperationState.UNKNOWN)
+    )
+    unknown = await flow.execute_operation("pay", intent, now=NOW)
+    resolution = OperatorResolution(
+        resolution_id="review-1",
+        actor="operator-7",
+        reason="Confirmed capture in provider ledger",
+        evidence_references=("case-42",),
+        resolved_at=NOW,
+        outcome=OperationOutcome(
+            OperationState.SUCCEEDED, correlation="charge-1"
+        ),
+    )
+    result = await flow.resolve_operation(
+        "pay",
+        "intent",
+        resolution,
+        expected_operation=unknown.operation,
+        expected_facts=unknown.snapshot,
+    )
+    assert result.outcome is OperationState.SUCCEEDED
+    assert result.snapshot.captured_funds == Decimal("100")
+    assert result.operation.resolutions == (resolution,)
+    assert await repository.list_unresolved_operations() == ()
+    # An acknowledgement lost by the caller must not duplicate audit or money.
+    repeated = await flow.resolve_operation(
+        "pay",
+        "intent",
+        resolution,
+        expected_operation=unknown.operation,
+        expected_facts=unknown.snapshot,
+    )
+    assert repeated == result
+    assert len(calls) == 1

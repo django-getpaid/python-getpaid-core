@@ -30,6 +30,7 @@ from getpaid_core.durable.records import OperationRecord
 from getpaid_core.durable.records import OutcomePlan
 from getpaid_core.durable.records import PaymentFacts
 from getpaid_core.durable.records import SubmissionPlan
+from getpaid_core.durable.resolution import OperatorResolution
 from getpaid_core.exceptions import StateConflictError
 from getpaid_core.exceptions import UnsupportedRepositoryError
 from getpaid_core.types import PaymentUpdate
@@ -120,6 +121,23 @@ class DurablePaymentRepository(Protocol):
         """
         ...
 
+    async def resolve_operation(
+        self,
+        payment_id: str,
+        operation_id: str,
+        resolution: OperatorResolution,
+        *,
+        expected_operation: OperationRecord,
+        expected_facts: PaymentFacts,
+    ) -> OutcomePlan:
+        """Apply ``plan_resolution`` with current facts and complete history.
+
+        Compare the operator-reviewed snapshots inside this atomic boundary.
+        Commit audit, all affected operations and facts together. Retain prior
+        disputes and recovery evidence. Authorization is the caller's duty.
+        """
+        ...
+
     async def get_operation(
         self, payment_id: str, operation_id: str
     ) -> OperationRecord | None:
@@ -157,6 +175,7 @@ MANDATORY_OPERATIONS: tuple[str, ...] = (
     "apply_observation",
     "record_operation_outcome",
     "record_operation_failure",
+    "resolve_operation",
     "get_operation",
     "list_unresolved_operations",
     "list_payments_requiring_reconciliation",

@@ -26,6 +26,8 @@ from getpaid_core.durable.records import OutcomePlan
 from getpaid_core.durable.records import PaymentFacts
 from getpaid_core.durable.records import ReplayRecord
 from getpaid_core.durable.records import SubmissionPlan
+from getpaid_core.durable.resolution import OperatorResolution
+from getpaid_core.durable.resolution import plan_resolution
 from getpaid_core.durable.rules import plan_observation
 from getpaid_core.durable.rules import plan_outcome
 from getpaid_core.durable.rules import plan_reservation
@@ -157,6 +159,37 @@ class InMemoryDurableRepository:
             recorded = plan_operation_failure(operations[index], evidence)
             operations[index] = recorded
             return recorded
+
+    async def resolve_operation(
+        self,
+        payment_id: str,
+        operation_id: str,
+        resolution: OperatorResolution,
+        *,
+        expected_operation: OperationRecord,
+        expected_facts: PaymentFacts,
+    ) -> OutcomePlan:
+        async with self._lock_for(payment_id):
+            operations = self._operations.get(payment_id, [])
+            index = self._operation_index(payment_id, operation_id, operations)
+            plan = plan_resolution(
+                self._facts[payment_id],
+                operations[index],
+                resolution,
+                expected_operation=expected_operation,
+                expected_facts=expected_facts,
+                operations=operations,
+            )
+            replacements = {
+                entry.operation_id: entry
+                for entry in (plan.operation, *plan.related_operations)
+            }
+            self._operations[payment_id] = [
+                replacements.get(entry.operation_id, entry)
+                for entry in operations
+            ]
+            self._facts[payment_id] = plan.facts
+            return plan
 
     async def get_operation(
         self, payment_id: str, operation_id: str

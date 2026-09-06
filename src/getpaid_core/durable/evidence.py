@@ -43,7 +43,9 @@ class RecoveryEvidence:
             type(self.settled_amount) is not Decimal
             or not self.settled_amount.is_finite()
         ):
-            raise InvalidTransitionError("Recovery amount must be finite money.")
+            raise InvalidTransitionError(
+                "Recovery amount must be finite money."
+            )
         for handle in (self.correlation, self.external_id):
             if handle is not None and safe_handle(handle) is None:
                 raise InvalidTransitionError("Recovery handle must be safe.")

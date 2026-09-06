@@ -25,6 +25,7 @@ from typing import Any
 
 if TYPE_CHECKING:
     from getpaid_core.durable.evidence import RecoveryEvidence
+    from getpaid_core.durable.resolution import OperatorResolution
 
 from getpaid_core.enums import FraudStatus
 from getpaid_core.enums import PaymentStatus
@@ -457,6 +458,7 @@ class OperationRecord:
     reconciliation_required: bool = False
     conflicting_outcomes: tuple["OperationOutcome", ...] = ()
     recovery_evidence: tuple["RecoveryEvidence", ...] = ()
+    resolutions: tuple["OperatorResolution", ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(

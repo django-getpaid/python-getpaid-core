@@ -39,8 +39,10 @@ from getpaid_core.durable.records import OperationRecord
 from getpaid_core.durable.records import OperationState
 from getpaid_core.durable.records import OperationType
 from getpaid_core.durable.records import OutcomePlan
+from getpaid_core.durable.records import PaymentFacts
 from getpaid_core.durable.repository import DurablePaymentRepository
 from getpaid_core.durable.repository import require_durable_state
+from getpaid_core.durable.resolution import OperatorResolution
 from getpaid_core.exceptions import CommunicationError
 from getpaid_core.exceptions import InvalidTransitionError
 from getpaid_core.exceptions import OperationConflictError
@@ -261,6 +263,30 @@ class DurablePaymentFlow(BaseFlow):
         except Exception:
             return False
         return True
+
+    async def resolve_operation(
+        self,
+        payment_id: str,
+        operation_id: str,
+        resolution: OperatorResolution,
+        *,
+        expected_operation: OperationRecord,
+        expected_facts: PaymentFacts,
+    ) -> OperationResult:
+        """Commit an authorized operator decision; never contact the provider.
+
+        The application supplies the reviewed snapshots and enforces access
+        control. Stale decisions conflict; local commit failures propagate
+        without inventing a committed result. Retry the same resolution ID.
+        """
+        plan = await self.repository.resolve_operation(
+            payment_id,
+            operation_id,
+            resolution,
+            expected_operation=expected_operation,
+            expected_facts=expected_facts,
+        )
+        return OperationResult(plan.operation, plan.facts)
 
     async def reconcile_operation(
         self,

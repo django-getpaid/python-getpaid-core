@@ -9,6 +9,8 @@ storage, transactions and scheduling.
 from getpaid_core.durable.conformance import CONFORMANCE_CHECKS
 from getpaid_core.durable.conformance import RepositoryFactory
 from getpaid_core.durable.conformance import run_conformance_suite
+from getpaid_core.durable.evidence import RecoveryEvidence
+from getpaid_core.durable.evidence import plan_operation_failure
 from getpaid_core.durable.flow import DurablePaymentFlow
 from getpaid_core.durable.memory import InMemoryDurableRepository
 from getpaid_core.durable.migration import BLOCKING_MIGRATION_FINDINGS
@@ -46,6 +48,8 @@ from getpaid_core.durable.repository import commit_semantic_transition
 from getpaid_core.durable.repository import missing_durable_operations
 from getpaid_core.durable.repository import require_durable_state
 from getpaid_core.durable.repository import supports_durable_state
+from getpaid_core.durable.resolution import OperatorResolution
+from getpaid_core.durable.resolution import plan_resolution
 from getpaid_core.durable.rules import plan_observation
 from getpaid_core.durable.rules import plan_outcome
 from getpaid_core.durable.rules import plan_reservation
@@ -77,9 +81,11 @@ __all__ = [
     "OperationResult",
     "OperationState",
     "OperationType",
+    "OperatorResolution",
     "OutcomePlan",
     "PaymentFacts",
     "PaymentObservation",
+    "RecoveryEvidence",
     "ReplayRecord",
     "RepositoryFactory",
     "ReservationPlan",
@@ -89,8 +95,10 @@ __all__ = [
     "observation_digest",
     "plan_migration",
     "plan_observation",
+    "plan_operation_failure",
     "plan_outcome",
     "plan_reservation",
+    "plan_resolution",
     "plan_submission",
     "require_durable_state",
     "run_conformance_suite",
