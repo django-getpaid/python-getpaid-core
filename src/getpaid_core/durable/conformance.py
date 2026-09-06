@@ -41,6 +41,7 @@ from decimal import Decimal
 from typing import Any
 from typing import cast
 
+from getpaid_core.durable.evidence import RecoveryEvidence
 from getpaid_core.durable.records import OperationIntent
 from getpaid_core.durable.records import OperationOutcome
 from getpaid_core.durable.records import OperationState
@@ -48,6 +49,7 @@ from getpaid_core.durable.records import OperationType
 from getpaid_core.durable.records import PaymentFacts
 from getpaid_core.durable.records import PaymentObservation
 from getpaid_core.durable.repository import DurablePaymentRepository
+from getpaid_core.durable.resolution import OperatorResolution
 from getpaid_core.enums import PaymentEvent
 from getpaid_core.enums import PaymentStatus
 from getpaid_core.exceptions import ConformanceError
@@ -575,10 +577,86 @@ async def check_observations_commit_operations_and_disputes(
     )
 
 
+async def check_recovery_and_resolution_are_retained(
+    factory: RepositoryFactory,
+) -> None:
+    """Concurrent writers retain claims; audit and money commit once."""
+    repository = await factory(_authorized_facts())
+    await repository.reserve_operation(
+        PAYMENT_ID, OperationIntent("capture", OperationType.CHARGE)
+    )
+    evidence = RecoveryEvidence(
+        state=OperationState.SUCCEEDED, correlation="capture-1"
+    )
+    await asyncio.gather(
+        *(
+            repository.record_operation_failure(PAYMENT_ID, "capture", evidence)
+            for _ in range(2)
+        )
+    )
+    operation = await repository.get_operation(PAYMENT_ID, "capture")
+    assert operation is not None
+    _require(
+        operation.recovery_evidence == (evidence,),
+        "recovery claims lost or duplicated",
+    )
+    _require(operation.reconciliation_required, "recovery flag was lost")
+    _require(
+        operation in await repository.list_unresolved_operations(),
+        "recovery not discoverable",
+    )
+    facts = await repository.get_payment_facts(PAYMENT_ID)
+    _require(facts.captured_funds == 0, "recovery claim invented settlement")
+    resolution = OperatorResolution(
+        "review-1",
+        "operator-1",
+        "Verified provider ledger",
+        ("ledger-1",),
+        datetime(2026, 9, 6, tzinfo=UTC),
+        OperationOutcome(OperationState.SUCCEEDED, correlation="capture-1"),
+    )
+    await asyncio.gather(
+        *(
+            repository.resolve_operation(
+                PAYMENT_ID,
+                "capture",
+                resolution,
+                expected_operation=operation,
+                expected_facts=facts,
+            )
+            for _ in range(2)
+        )
+    )
+    recorded = await repository.get_operation(PAYMENT_ID, "capture")
+    assert recorded is not None
+    _require(recorded.resolutions == (resolution,), "audit lost or duplicated")
+    _require(
+        recorded.recovery_evidence == (evidence,),
+        "resolution erased recovery evidence",
+    )
+    _require(
+        recorded.state is OperationState.SUCCEEDED,
+        "resolution did not commit state",
+    )
+    _require(
+        (await repository.get_payment_facts(PAYMENT_ID)).captured_funds
+        == REQUIRED,
+        "resolution did not atomically commit settlement",
+    )
+    _require(
+        not await repository.list_unresolved_operations(),
+        "resolution still unresolved",
+    )
+
+
 #: The checks an adapter must pass, in the order the suite runs them.
 CONFORMANCE_CHECKS: tuple[
     tuple[str, Callable[[RepositoryFactory], Awaitable[None]]], ...
 ] = (
+    (
+        "recovery_and_resolution_are_retained",
+        check_recovery_and_resolution_are_retained,
+    ),
     (
         "submission_right_is_exclusive",
         check_submission_right_is_exclusive,

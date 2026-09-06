@@ -77,6 +77,7 @@ def test_the_suite_has_checks_for_every_required_race():
         "submission_right_is_exclusive",
         "conflicting_outcomes_are_retained",
         "observations_commit_operations_and_disputes",
+        "recovery_and_resolution_are_retained",
     }
 
 

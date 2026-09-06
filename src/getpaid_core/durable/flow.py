@@ -315,9 +315,8 @@ class DurablePaymentFlow(BaseFlow):
                 "No reserved operation with that identity."
             )
         if (
-            not operation.is_active
-            or operation.state is OperationState.RESERVED
-        ):
+            not operation.is_active and not operation.reconciliation_required
+        ) or operation.state is OperationState.RESERVED:
             return await self._operation_result(operation)
         processor = self.registry.get_by_slug(operation.backend)
         capability = self._capability(processor, operation.operation_type)

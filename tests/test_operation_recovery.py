@@ -162,7 +162,7 @@ async def test_result_repr_excludes_metadata_and_frozen_provider_parameters():
 
     from getpaid_core.durable import OperationResult
 
-    repository, flow, intent, _ = await recovery_flow(
+    _, flow, intent, _ = await recovery_flow(
         OperationType.CHARGE, OperationOutcome(OperationState.PROVIDER_PENDING)
     )
     result = await flow.execute_operation("pay", intent, now=NOW)
