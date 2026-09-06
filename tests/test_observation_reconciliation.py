@@ -473,3 +473,99 @@ async def test_correlated_settlement_exceeding_reservation_is_retained():
     operation = await repository.get_operation("payment", "refund")
     assert operation.state == OperationState.RESERVED
     assert operation.conflicting_outcomes[0].settled_amount == Decimal("120")
+
+
+async def test_conflicting_delta_and_operation_settlement_are_not_guessed():
+    repository = InMemoryDurableRepository(
+        [
+            PaymentFacts(
+                "payment",
+                Decimal("100"),
+                remaining_authorization=Decimal("100"),
+                status=PaymentStatus.PRE_AUTH,
+            )
+        ]
+    )
+    await repository.reserve_operation(
+        "payment",
+        OperationIntent("charge", OperationType.CHARGE, Decimal("30")),
+    )
+    plan = await repository.apply_observation(
+        "payment",
+        PaymentObservation(
+            paid_amount=Decimal("20"),
+            delta_only=True,
+            operation_id="charge",
+            outcome=OperationOutcome(
+                OperationState.SUCCEEDED, settled_amount=Decimal("15")
+            ),
+        ),
+    )
+    assert plan.facts.captured_funds == 0
+    assert plan.facts.reconciliation_required
+    assert plan.facts.observation_conflicts
+    assert (
+        await repository.get_operation("payment", "charge")
+    ).state == OperationState.RESERVED
+
+
+@pytest.mark.parametrize("cancel_first", [False, True])
+async def test_correlated_refund_cancellation_race_preserves_returned_funds(
+    cancel_first,
+):
+    repository = InMemoryDurableRepository(
+        [
+            PaymentFacts(
+                "payment",
+                Decimal("100"),
+                captured_funds=Decimal("100"),
+                status=PaymentStatus.PAID,
+            )
+        ]
+    )
+    await repository.reserve_operation(
+        "payment",
+        OperationIntent("refund", OperationType.START_REFUND, Decimal("30")),
+    )
+    await repository.record_operation_outcome(
+        "payment",
+        "refund",
+        OperationOutcome(
+            OperationState.PROVIDER_PENDING, correlation="refund-handle"
+        ),
+    )
+    await repository.reserve_operation(
+        "payment",
+        OperationIntent(
+            "cancel",
+            OperationType.CANCEL_REFUND,
+            parameters={"target_operation_id": "refund"},
+        ),
+    )
+    cancelled = PaymentObservation(
+        payment_event=PaymentEvent.REFUND_CANCELLED,
+        operation_id="cancel",
+        outcome=OperationOutcome(OperationState.SUCCEEDED),
+    )
+    settled = PaymentObservation(
+        refunded_amount=Decimal("30"),
+        outcome=OperationOutcome(
+            OperationState.SUCCEEDED,
+            settled_amount=Decimal("30"),
+            correlation="refund-handle",
+        ),
+    )
+    for update in (
+        [cancelled, settled] if cancel_first else [settled, cancelled]
+    ):
+        await repository.apply_observation("payment", update)
+    facts = await repository.get_payment_facts("payment")
+    assert facts.captured_funds == Decimal("100")
+    assert facts.refunded_funds == Decimal("30")
+    assert facts.status == PaymentStatus.PARTIALLY_REFUNDED
+    assert (
+        await repository.get_operation("payment", "refund")
+    ).state == OperationState.SUCCEEDED
+    assert (
+        await repository.get_operation("payment", "cancel")
+    ).state == OperationState.SUCCEEDED

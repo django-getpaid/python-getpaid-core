@@ -268,6 +268,36 @@ def _financial_observation_is_possible(
     )
 
 
+def _delta_matches_outcome(
+    update: PaymentObservation, operation: OperationRecord
+) -> bool:
+    if not update.delta_only:
+        return True
+    outcome = update.outcome
+    assert outcome is not None
+    settled = (
+        operation.resolved_amount
+        if outcome.settled_amount is None
+        else outcome.settled_amount
+    )
+    expected = (
+        (settled, None, None)
+        if operation.operation_type is OperationType.CHARGE
+        else (None, settled, None)
+        if operation.operation_type is OperationType.START_REFUND
+        else (None, None, None)
+    )
+    return all(
+        actual is None
+        or (outcome.state is OperationState.SUCCEEDED and actual == confirmed)
+        for actual, confirmed in zip(
+            (update.paid_amount, update.refunded_amount, update.locked_amount),
+            expected,
+            strict=True,
+        )
+    )
+
+
 def plan_observation(
     facts: PaymentFacts,
     replay_log: Iterable[ReplayRecord],
@@ -370,6 +400,8 @@ def plan_observation(
         ]
         if len(candidates) != 1:
             result = _retain_observation(result, update, "uncorrelated_outcome")
+        elif not _delta_matches_outcome(update, candidates[0]):
+            result = _retain_observation(result, update, "conflicting_delta")
         else:
             outcome_plan = plan_outcome(
                 result, candidates[0], update.outcome, operations=operations
