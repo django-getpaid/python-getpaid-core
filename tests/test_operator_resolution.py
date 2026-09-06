@@ -394,6 +394,76 @@ async def test_refund_correction_preserves_unrelated_external_refund_progress():
     assert await repository.get_payment_facts("pay") == result.facts
 
 
+@pytest.mark.parametrize(
+    "state", [OperationState.REJECTED, OperationState.SUCCEEDED]
+)
+@pytest.mark.parametrize("clear_payment_reconciliation", [False, True])
+async def test_rejected_refund_resolution_preserves_external_progress_and_blocks_capture(
+    state, clear_payment_reconciliation
+):
+    repository = InMemoryDurableRepository(
+        [
+            PaymentFacts(
+                "pay",
+                Decimal("100"),
+                captured_funds=Decimal("50"),
+                remaining_authorization=Decimal("50"),
+                status=PaymentStatus.PARTIAL,
+            )
+        ]
+    )
+    await repository.reserve_operation(
+        "pay",
+        OperationIntent("old-refund", OperationType.START_REFUND, Decimal("30")),
+    )
+    rejected = await repository.record_operation_outcome(
+        "pay", "old-refund", OperationOutcome(OperationState.REJECTED)
+    )
+    assert rejected.facts.status == PaymentStatus.PARTIAL
+    pending = await repository.apply_observation(
+        "pay", PaymentObservation(payment_event=PaymentEvent.REFUND_REQUESTED)
+    )
+    capture = OperationIntent("capture", OperationType.CHARGE, Decimal("10"))
+    with pytest.raises(InvalidTransitionError):
+        await repository.reserve_operation("pay", capture)
+    resolution = decision(
+        outcome=OperationOutcome(state),
+        clear_payment_reconciliation=clear_payment_reconciliation,
+    )
+    resolved = await repository.resolve_operation(
+        "pay",
+        "old-refund",
+        resolution,
+        expected_facts=pending.facts,
+        expected_operation=rejected.operation,
+    )
+    assert resolved.facts.status == PaymentStatus.REFUND_STARTED
+    assert resolved.facts.captured_funds == Decimal("50")
+    assert resolved.facts.remaining_authorization == Decimal("50")
+    assert resolved.facts.refunded_funds == (
+        Decimal("30") if state is OperationState.SUCCEEDED else Decimal("0")
+    )
+    assert not resolved.facts.reconciliation_required
+    assert not resolved.operation.reconciliation_required
+    assert resolved.operation.state is state
+    assert resolved.operation.resolutions == (resolution,)
+    with pytest.raises(InvalidTransitionError):
+        await repository.reserve_operation("pay", capture)
+    assert await repository.get_payment_facts("pay") == resolved.facts
+    assert (
+        await repository.get_operation("pay", "old-refund")
+        == resolved.operation
+    )
+    retried = await repository.resolve_operation(
+        "pay",
+        "old-refund",
+        resolution,
+        expected_facts=pending.facts,
+        expected_operation=rejected.operation,
+    )
+    assert retried == resolved
+
+
 async def test_resolution_cannot_erase_confirmed_effects_or_reuse_audit_identity():
     repository, flow, intent, _ = await recovery_flow(
         OperationType.CHARGE, OperationOutcome(OperationState.SUCCEEDED)

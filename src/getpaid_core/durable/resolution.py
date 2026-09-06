@@ -206,10 +206,13 @@ def plan_resolution(
         raise InvalidTransitionError(
             "Resolution conflicts with financial facts or correlation."
         )
-    if correcting_settlement and facts.status == PaymentStatus.REFUND_STARTED:
-        # A completed intent no longer owns the pending-refund marker. Its
-        # corrected amount cannot resolve later externally initiated work,
-        # which may have no local reservation in the retained history.
+    if (
+        operation.state in TERMINAL_OPERATION_STATES
+        and facts.status == PaymentStatus.REFUND_STARTED
+    ):
+        # A terminal intent no longer owns the pending-refund marker.
+        # Reconfirming or correcting it cannot resolve unrelated external
+        # work, which may have no local reservation in the retained history.
         plan = replace(
             plan, facts=replace(plan.facts, status=PaymentStatus.REFUND_STARTED)
         )
