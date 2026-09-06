@@ -147,6 +147,18 @@ def plan_resolution(
             "Resolution cannot undo confirmed effects."
         )
     operations = tuple(operations)
+    if (
+        operation.state is OperationState.REJECTED
+        and outcome.state is OperationState.SUCCEEDED
+        and any(
+            entry.reservation_sequence > operation.reservation_sequence
+            for entry in operations
+        )
+    ):
+        raise InvalidTransitionError(
+            "Cannot overturn rejection after later intents; reconcile "
+            "cumulative provider evidence without reusing an old baseline."
+        )
     candidate = replace(
         operation,
         reconciliation_required=False,

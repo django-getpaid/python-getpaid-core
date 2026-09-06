@@ -210,6 +210,52 @@ def test_operator_acknowledgement_cannot_clear_corrupt_financial_facts():
         )
 
 
+@pytest.mark.parametrize(
+    "later_state", [OperationState.RESERVED, OperationState.SUCCEEDED]
+)
+async def test_rejected_capture_resolution_cannot_reuse_baseline_after_later_intents(
+    later_state,
+):
+    from getpaid_core.durable import OperationIntent
+    from getpaid_core.durable import PaymentFacts
+
+    repository = InMemoryDurableRepository(
+        [
+            PaymentFacts(
+                "pay",
+                Decimal("100"),
+                remaining_authorization=Decimal("100"),
+                status="pre-auth",
+            )
+        ]
+    )
+    await repository.reserve_operation(
+        "pay", OperationIntent("a", OperationType.CHARGE, Decimal("40"))
+    )
+    await repository.record_operation_outcome(
+        "pay", "a", OperationOutcome(OperationState.REJECTED)
+    )
+    await repository.reserve_operation(
+        "pay", OperationIntent("b", OperationType.CHARGE, Decimal("40"))
+    )
+    if later_state is OperationState.SUCCEEDED:
+        await repository.record_operation_outcome(
+            "pay", "b", OperationOutcome(OperationState.SUCCEEDED)
+        )
+    before = await repository.get_payment_facts("pay")
+    operation = await repository.get_operation("pay", "a")
+    with pytest.raises(InvalidTransitionError, match="later"):
+        await repository.resolve_operation(
+            "pay",
+            "a",
+            decision(),
+            expected_facts=before,
+            expected_operation=operation,
+        )
+    assert await repository.get_payment_facts("pay") == before
+    assert await repository.get_operation("pay", "a") == operation
+
+
 async def test_failed_audit_commit_leaves_uncertainty_and_no_money():
     class Unavailable(InMemoryDurableRepository):
         async def resolve_operation(self, *args, **kwargs):

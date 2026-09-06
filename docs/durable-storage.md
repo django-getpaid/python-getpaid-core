@@ -364,8 +364,11 @@ command is sent. Local storage errors propagate; retry the same decision identit
 
 The planner reuses financial rules and complete history. It cannot undo confirmed
 capture/refund, force impossible amounts into balances or silently replace known
-correlation. Prior disputed outcomes, observation conflicts and recovery claims
-remain retained. New contradictory callbacks flag reconciliation again; the audit
+correlation. A rejected operation cannot be changed to succeeded after any later
+intent was reserved: its old starting totals cannot establish the combined effect
+safely. Reconcile trustworthy cumulative provider evidence first through the
+integration; do not force an old reservation baseline over subsequent work.
+Prior disputed outcomes, observation conflicts and recovery claims remain retained. New contradictory callbacks flag reconciliation again; the audit
 never suppresses provider evidence. Release/cancellation cannot invent returned
 funds or erase racing refund settlement.
 
