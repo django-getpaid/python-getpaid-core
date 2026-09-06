@@ -15,8 +15,10 @@ from getpaid_core.durable.records import OperationOutcome
 from getpaid_core.durable.records import OperationState
 from getpaid_core.durable.records import OperationType
 from getpaid_core.durable.records import PaymentFacts
+from getpaid_core.durable.rules import plan_outcome
 from getpaid_core.durable.rules import plan_reservation
 from getpaid_core.enums import PaymentStatus
+from getpaid_core.exceptions import InvalidTransitionError
 
 
 def authorized_facts(**overrides):
@@ -114,3 +116,26 @@ async def test_atomic_submission_claim_freezes_first_window_and_scope():
     )
     assert not expired.granted
     assert expired.operation == retried.operation
+
+
+@pytest.mark.parametrize(
+    "state, amount",
+    [
+        (OperationState.RESERVED, None),
+        (OperationState.SUBMITTING, None),
+        (OperationState.SUCCEEDED, Decimal("41")),
+        (OperationState.SUCCEEDED, Decimal("0")),
+        (OperationState.PROVIDER_PENDING, Decimal("10")),
+        (OperationState.REJECTED, Decimal("10")),
+        (OperationState.UNKNOWN, Decimal("10")),
+    ],
+)
+def test_normalized_outcomes_cannot_claim_unreserved_money(state, amount):
+    facts = authorized_facts()
+    operation = plan_reservation(
+        facts, (), charge_intent(amount=Decimal("40"))
+    ).operation
+    with pytest.raises(InvalidTransitionError):
+        plan_outcome(
+            facts, operation, OperationOutcome(state, settled_amount=amount)
+        )

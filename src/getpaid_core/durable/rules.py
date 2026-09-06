@@ -422,7 +422,13 @@ def _settlement_update(
         raise InvalidTransitionError(
             f"A succeeded {operation_type.value} needs a settled amount."
         )
-    validate_amount(settled, f"{operation_type.value} settled amount")
+    validate_amount(
+        settled,
+        f"{operation_type.value} settled amount",
+        allow_zero=False,
+        maximum=operation.resolved_amount,
+        maximum_name="reserved amount",
+    )
 
     if operation_type is OperationType.CHARGE:
         return PaymentUpdate(
@@ -447,6 +453,25 @@ def plan_outcome(
     outcome -- including ``UNKNOWN`` -- moves no money and leaves the
     operation discoverable as unresolved work.
     """
+    if outcome.state not in {
+        OperationState.SUCCEEDED,
+        OperationState.REJECTED,
+        OperationState.PROVIDER_PENDING,
+        OperationState.UNKNOWN,
+    }:
+        raise InvalidTransitionError(
+            "An outcome must describe provider evidence."
+        )
+    if outcome.settled_amount is not None and (
+        outcome.state is not OperationState.SUCCEEDED
+        or operation.operation_type
+        not in {OperationType.CHARGE, OperationType.START_REFUND}
+    ):
+        raise InvalidTransitionError(
+            "Only a confirmed capture or refund carries a settled amount."
+        )
+    if outcome.state is OperationState.SUCCEEDED:
+        _settlement_update(operation, outcome)
     current = operation.state
     if current in TERMINAL_OPERATION_STATES:
         if outcome.state is not current:
