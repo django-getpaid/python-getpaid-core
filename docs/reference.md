@@ -51,7 +51,7 @@
 ## Durable Recovery and Operator Resolution
 
 These are **unreleased next-major** APIs. Released charge-specific recovery is
-unchanged; see [error migration and storage cutover](durable-storage.md#safe-evidence-and-legacy-error-migration).
+unchanged; see {ref}`error migration and storage cutover <safe-evidence-and-legacy-error-migration>`.
 
 | Surface | Contract |
 |---------|----------|

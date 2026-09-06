@@ -295,6 +295,7 @@ This asyncio-specific retention attempt is awaited inline, without shielding or
 background tasks. Cancellation still propagates; cancellation-aware bounded
 cleanup belongs to the subsequent cancellation slice, not this guarantee.
 
+(safe-evidence-and-legacy-error-migration)=
 ### Safe evidence and legacy error migration
 
 `RecoveryEvidence` contains only `state`, finite `settled_amount`, `correlation`
@@ -324,6 +325,7 @@ Do not log raw exception chains: `__cause__` deliberately preserves the original
 adapter error and may contain sensitive text. Route detailed diagnostics through
 an access-controlled channel; core does not log them.
 
+(audited-operator-resolution)=
 ### Audited operator resolution
 
 Applications authorize the operator, gather provider evidence and load current

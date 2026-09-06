@@ -40,7 +40,7 @@ with actor, reason, evidence references and decision time. The integration autho
 the operator; core atomically compares reviewed snapshots, applies financial rules
 and commits audit with settlement. Stale decisions fail, old evidence survives, and
 a new contradictory callback can reopen reconciliation. Time alone never resolves
-uncertainty. See the [recovery contract](durable-storage.md#audited-operator-resolution)
+uncertainty. See the {ref}`recovery contract <audited-operator-resolution>`
 for storage upgrade and error migration details. Cancellation-aware cleanup remains
 separate work; these guarantees do not extend the released `PaymentFlow`.
 
