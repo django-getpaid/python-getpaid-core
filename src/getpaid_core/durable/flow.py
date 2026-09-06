@@ -127,9 +127,23 @@ class DurablePaymentFlow(BaseFlow):
             operation=intent.operation_type.value, payment=facts, intent=intent
         )
         intent = context["intent"]
+        existing = await self.repository.get_operation(
+            payment_id, intent.operation_id
+        )
+        operation = None
+        if existing is not None:
+            # Validate same-ID semantics atomically, even for terminal reads.
+            operation = await self.repository.reserve_operation(
+                payment_id, intent
+            )
+            if operation.state is not OperationState.RESERVED:
+                return await self._operation_result(operation)
         processor = self.registry.get_by_slug(facts.backend)
         capability = self._capability(processor, intent.operation_type)
-        operation = await self.repository.reserve_operation(payment_id, intent)
+        if operation is None:
+            operation = await self.repository.reserve_operation(
+                payment_id, intent
+            )
         if operation.state is not OperationState.RESERVED:
             return await self._operation_result(operation)
         deadline = (

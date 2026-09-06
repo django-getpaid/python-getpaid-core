@@ -54,8 +54,8 @@ class BaseProcessor(ABC):
         provider correlation for a targeted cancellation. Config supplies only
         deployment settings/credentials, whose provider account must stay stable
         throughout an intent's lifetime. Never read current balances to
-        construct a retry payload. Return normalized acceptance/settlement evidence;
-        communication uncertainty is not rejection.
+        construct a retry payload. Return normalized acceptance/settlement
+        evidence; communication uncertainty is not rejection.
         """
         raise NotImplementedError
 

@@ -387,6 +387,30 @@ async def test_failed_pre_submission_write_never_reaches_provider(stage):
         assert operation.state is OperationState.RESERVED
 
 
+async def test_existing_intent_is_readable_after_provider_capability_is_disabled():
+    from getpaid_core.durable import OperationCapabilities
+
+    class Recording(MockProcessor):
+        operation_capabilities = {
+            OperationType.CHARGE: OperationCapabilities(
+                idempotency_scope="merchant",
+                idempotency_window=timedelta(hours=1),
+            )
+        }
+
+        @classmethod
+        async def submit_operation(cls, operation, *, config):
+            return OperationOutcome(OperationState.SUCCEEDED)
+
+    _, flow = make_flow(Recording)
+    intent = OperationIntent("capture", OperationType.CHARGE)
+    await flow.execute_operation("pay", intent, now=NOW)
+    Recording.operation_capabilities = {}
+    result = await flow.execute_operation("pay", intent, now=NOW)
+    assert result.outcome is OperationState.SUCCEEDED
+    assert result.snapshot.captured_funds == Decimal("100")
+
+
 def make_flow(processor, *, repository=None, **options):
     registry = PluginRegistry()
     registry._discovered = True
