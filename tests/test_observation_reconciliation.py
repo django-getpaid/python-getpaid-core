@@ -14,6 +14,7 @@ from getpaid_core.durable import PaymentFacts
 from getpaid_core.enums import PaymentEvent
 from getpaid_core.enums import PaymentStatus
 from getpaid_core.exceptions import ReconciliationBlockedError
+from getpaid_core.exceptions import InvalidTransitionError
 from getpaid_core.types import PaymentUpdate
 
 
@@ -318,3 +319,107 @@ async def test_delta_only_evidence_needs_proven_intent_history(correlated):
     )
     if not correlated:
         assert len(plan.facts.observation_conflicts) == 1
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("operation_id", []),
+        ("outcome", {}),
+        ("delta_only", "yes"),
+        ("cancellation_scope", "refund_everything"),
+        ("external_id", []),
+        ("fraud_message", {}),
+    ],
+)
+async def test_malformed_observation_is_rejected_atomically(field, value):
+    facts = PaymentFacts("payment", D("100"), status=PaymentStatus.PREPARED)
+    repository = InMemoryDurableRepository([facts])
+    update = PaymentObservation(
+        payment_event=PaymentEvent.PAYMENT_CAPTURED,
+        paid_amount=D("40"),
+        provider_event_id="event",
+    )
+    setattr(update, field, value)
+    with pytest.raises(InvalidTransitionError):
+        await repository.apply_observation("payment", update)
+    assert await repository.get_payment_facts("payment") == facts
+    valid = await repository.apply_observation(
+        "payment",
+        PaymentUpdate(
+            payment_event=PaymentEvent.PAYMENT_CAPTURED,
+            paid_amount=D("40"),
+            provider_event_id="event",
+        ),
+    )
+    assert valid.applied
+
+
+async def test_late_correlated_refund_acceptance_cannot_reopen_completion():
+    repository = InMemoryDurableRepository(
+        [
+            PaymentFacts(
+                "payment",
+                D("100"),
+                captured_funds=D("100"),
+                status=PaymentStatus.PAID,
+            )
+        ]
+    )
+    await repository.reserve_operation(
+        "payment",
+        OperationIntent("refund", OperationType.START_REFUND, D("100")),
+    )
+    await repository.record_operation_outcome(
+        "payment",
+        "refund",
+        OperationOutcome(OperationState.SUCCEEDED, correlation="refund-handle"),
+    )
+    plan = await repository.apply_observation(
+        "payment",
+        PaymentObservation(
+            payment_event=PaymentEvent.REFUND_REQUESTED,
+            outcome=OperationOutcome(
+                OperationState.PROVIDER_PENDING, correlation="refund-handle"
+            ),
+        ),
+    )
+    assert plan.facts.status == PaymentStatus.REFUNDED
+    assert plan.operations[0].state == OperationState.SUCCEEDED
+
+
+@pytest.mark.parametrize("identity", [None, "other"])
+async def test_uncorrelated_same_amount_cannot_resolve_current_refund(identity):
+    repository = InMemoryDurableRepository(
+        [
+            PaymentFacts(
+                "payment",
+                D("100"),
+                captured_funds=D("100"),
+                status=PaymentStatus.PAID,
+            )
+        ]
+    )
+    await repository.reserve_operation(
+        "payment",
+        OperationIntent("refund", OperationType.START_REFUND, D("30")),
+    )
+    plan = await repository.apply_observation(
+        "payment",
+        PaymentObservation(
+            payment_event=PaymentEvent.REFUND_CONFIRMED,
+            refunded_amount=D("30"),
+            operation_id=identity,
+            outcome=OperationOutcome(
+                OperationState.SUCCEEDED,
+                settled_amount=D("30"),
+                correlation="unrelated",
+            ),
+        ),
+    )
+    assert plan.facts.refunded_funds == D("30")
+    assert plan.facts.status == PaymentStatus.REFUND_STARTED
+    assert plan.facts.reconciliation_required
+    assert (
+        await repository.get_operation("payment", "refund")
+    ).state == OperationState.RESERVED

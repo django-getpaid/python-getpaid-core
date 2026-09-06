@@ -36,6 +36,7 @@ from getpaid_core.durable.records import SubmissionPlan
 from getpaid_core.durable.records import observation_content
 from getpaid_core.durable.records import validate_event_identity
 from getpaid_core.durable.records import validate_provider_metadata
+from getpaid_core.enums import FraudEvent
 from getpaid_core.enums import PaymentEvent
 from getpaid_core.enums import PaymentStatus
 from getpaid_core.exceptions import InvalidTransitionError
@@ -164,6 +165,84 @@ def _retain_observation(
     )
 
 
+def _validate_observation(update: PaymentUpdate) -> None:
+    validate_provider_metadata(
+        update.provider_data, name="Observation metadata"
+    )
+    validate_event_identity(update.provider_event_id)
+    for name in ("external_id", "fraud_message"):
+        value = getattr(update, name)
+        if value is not None and not isinstance(value, str):
+            raise InvalidTransitionError(
+                f"Observation {name} must be a string."
+            )
+    for value, enum in (
+        (update.payment_event, PaymentEvent),
+        (update.fraud_event, FraudEvent),
+    ):
+        if value is not None and not isinstance(value, enum):
+            raise InvalidTransitionError(
+                "Observation event must be normalized."
+            )
+    if not isinstance(update, PaymentObservation):
+        return
+    if update.operation_id is not None and (
+        not isinstance(update.operation_id, str)
+        or not update.operation_id.strip()
+    ):
+        raise InvalidTransitionError(
+            "Observation operation_id must be nonempty."
+        )
+    if type(update.delta_only) is not bool:
+        raise InvalidTransitionError(
+            "Observation delta_only must be a boolean."
+        )
+    if update.cancellation_scope is not None and (
+        update.cancellation_scope is not OperationType.RELEASE_LOCK
+        or update.payment_event is not PaymentEvent.LOCK_RELEASED
+    ):
+        raise InvalidTransitionError(
+            "Unsupported observation cancellation scope."
+        )
+    if update.outcome is None:
+        if update.operation_id is not None:
+            raise InvalidTransitionError(
+                "Operation identity requires an outcome."
+            )
+        return
+    if not isinstance(update.outcome, OperationOutcome):
+        raise InvalidTransitionError("Observation outcome must be normalized.")
+    outcome = update.outcome
+    if type(outcome.reconciliation_required) is not bool:
+        raise InvalidTransitionError(
+            "Outcome reconciliation must be a boolean."
+        )
+    for value in (outcome.correlation, outcome.external_id):
+        if value is not None and (
+            not isinstance(value, str) or not value.strip()
+        ):
+            raise InvalidTransitionError(
+                "Outcome handles must be nonempty strings."
+            )
+    if outcome.state not in {
+        OperationState.SUCCEEDED,
+        OperationState.REJECTED,
+        OperationState.PROVIDER_PENDING,
+        OperationState.UNKNOWN,
+    }:
+        raise InvalidTransitionError(
+            "An outcome must describe provider evidence."
+        )
+    if outcome.settled_amount is not None and (
+        not isinstance(outcome.settled_amount, Decimal)
+        or not outcome.settled_amount.is_finite()
+        or outcome.state is not OperationState.SUCCEEDED
+    ):
+        raise InvalidTransitionError(
+            "Only settlement carries a finite Decimal."
+        )
+
+
 def _financial_observation_is_possible(
     facts: PaymentFacts, update: PaymentUpdate
 ) -> bool:
@@ -214,9 +293,7 @@ def plan_observation(
     if update is None:
         return ObservationPlan(facts=facts, replay_record=None, applied=False)
 
-    validate_provider_metadata(
-        update.provider_data, name="Observation metadata"
-    )
+    _validate_observation(update)
     identity = validate_event_identity(update.provider_event_id)
     if not _financial_observation_is_possible(facts, update):
         return ObservationPlan(
@@ -246,6 +323,10 @@ def plan_observation(
     operations = tuple(operations)
     changed: tuple[OperationRecord, ...] = ()
     aggregate = update
+    if isinstance(update, PaymentObservation) and update.outcome is not None:
+        # Operation lifecycle is resolved by correlated evidence below, not a
+        # payment-wide request label that could reopen a completed operation.
+        aggregate = replace(update, payment_event=None)
     if isinstance(update, PaymentObservation) and update.delta_only:
         aggregate = replace(
             update,
