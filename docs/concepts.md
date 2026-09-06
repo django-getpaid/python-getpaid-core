@@ -236,12 +236,18 @@ therefore overwrite each other's committed amounts.
 class DurablePaymentRepository(Protocol):
     async def get_payment_facts(self, payment_id: str) -> PaymentFacts: ...
     async def reserve_operation(self, payment_id: str, intent: OperationIntent) -> OperationRecord: ...
+    async def claim_submission(
+        self, payment_id: str, operation_id: str, *, expected_attempt: int,
+        now: datetime, retry_until: datetime | None = None,
+        idempotency_scope: str | None = None,
+    ) -> SubmissionPlan: ...
     async def apply_observation(self, payment_id: str, update: PaymentUpdate | None) -> ObservationPlan: ...
     async def record_operation_outcome(
         self, payment_id: str, operation_id: str, outcome: OperationOutcome
     ) -> OutcomePlan: ...
     async def get_operation(self, payment_id: str, operation_id: str) -> OperationRecord | None: ...
     async def list_unresolved_operations(self) -> Sequence[OperationRecord]: ...
+    async def list_payments_requiring_reconciliation(self) -> Sequence[PaymentFacts]: ...
 ```
 
 Every operation addresses a payment by identity, applies core's rules to
@@ -279,10 +285,14 @@ GetPaidException
 ├── CredentialsError
 ├── InvalidCallbackError
 ├── InvalidTransitionError
+│   └── OperationEvidenceError
 ├── ReconciliationRequiredError
 ├── UnsupportedRepositoryError
+├── UnsupportedProcessorError
+├── OperationPersistenceError
 ├── StateConflictError
 ├── OperationConflictError
+│   └── ReconciliationBlockedError
 ├── ConformanceError
 └── BackendNotFoundError (also a KeyError)
 ```
