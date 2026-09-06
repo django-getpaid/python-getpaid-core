@@ -96,9 +96,18 @@ class DurablePaymentRepository(Protocol):
         ...
 
     async def record_operation_outcome(
-        self, payment_id: str, operation_id: str, outcome: OperationOutcome
+        self,
+        payment_id: str,
+        operation_id: str,
+        outcome: OperationOutcome,
+        *,
+        submission_response: bool = False,
     ) -> OutcomePlan:
         """Record an operation outcome and its financial effects.
+
+        Pass ``submission_response`` to ``plan_outcome``. Only command/query
+        response recording uses True; callbacks must leave it False so a
+        terminal callback cannot hide still-unrecorded response evidence.
 
         Returns the committed operation record together with the facts it
         settled and any related operations; all commit atomically, including

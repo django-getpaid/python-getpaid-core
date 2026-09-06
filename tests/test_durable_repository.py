@@ -56,7 +56,12 @@ class ConformingRepository:
         raise NotImplementedError
 
     async def record_operation_outcome(
-        self, payment_id: str, operation_id: str, outcome: OperationOutcome
+        self,
+        payment_id: str,
+        operation_id: str,
+        outcome: OperationOutcome,
+        *,
+        submission_response: bool = False,
     ) -> OutcomePlan:
         raise NotImplementedError
 

@@ -182,7 +182,7 @@ async def test_final_write_failure_exposes_safe_identity_and_keeps_recovery_anch
     from getpaid_core.exceptions import OperationPersistenceError
 
     class FailingRepository(InMemoryDurableRepository):
-        async def record_operation_outcome(self, *args):
+        async def record_operation_outcome(self, *args, **kwargs):
             raise OSError("database unavailable")
 
     calls = []

@@ -174,7 +174,9 @@ def plan_resolution(
             "Resolution conflicts with financial facts or correlation."
         )
     recorded = replace(
-        plan.operation, resolutions=(*operation.resolutions, resolution)
+        plan.operation,
+        resolutions=(*operation.resolutions, resolution),
+        response_pending=False,
     )
     facts = plan.facts
     if resolution.clear_payment_reconciliation:

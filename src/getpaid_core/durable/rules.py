@@ -559,7 +559,7 @@ def _blocking_operation(
     """
     target = intent.parameters.get(CANCELLATION_TARGET)
     for record in operations:
-        if not record.is_active:
+        if not record.is_active and not record.response_pending:
             continue
         if record.operation_id == intent.operation_id:
             continue
@@ -740,6 +740,7 @@ def plan_submission(
                 state=OperationState.SUBMITTING,
                 submitted_at=now,
                 submission_attempts=1,
+                response_pending=True,
                 retry_until=retry_until,
                 idempotency_scope=idempotency_scope,
             ),
@@ -757,6 +758,7 @@ def plan_submission(
             operation,
             state=OperationState.SUBMITTING,
             submission_attempts=operation.submission_attempts + 1,
+            response_pending=True,
         ),
         granted=True,
     )
@@ -875,6 +877,31 @@ def _disputed_outcome(
 
 
 def plan_outcome(
+    facts: PaymentFacts,
+    operation: OperationRecord,
+    outcome: OperationOutcome,
+    *,
+    operations: Iterable[OperationRecord] = (),
+    submission_response: bool = False,
+) -> OutcomePlan:
+    """Apply evidence; only a recorded response retires response-pending work.
+
+    Callbacks use the default: provider settlement does not prove the command
+    worker recorded its response. A command response or authoritative lookup
+    sets ``submission_response=True`` and commits that acknowledgement with
+    all planned state, including disputes. Failed commits clear nothing.
+    """
+    if type(submission_response) is not bool:
+        raise InvalidTransitionError("submission_response must be boolean.")
+    plan = _plan_outcome(facts, operation, outcome, operations=operations)
+    if submission_response:
+        plan = replace(
+            plan, operation=replace(plan.operation, response_pending=False)
+        )
+    return plan
+
+
+def _plan_outcome(
     facts: PaymentFacts,
     operation: OperationRecord,
     outcome: OperationOutcome,

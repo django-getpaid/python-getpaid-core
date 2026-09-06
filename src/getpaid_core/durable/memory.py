@@ -128,7 +128,12 @@ class InMemoryDurableRepository:
         )
 
     async def record_operation_outcome(
-        self, payment_id: str, operation_id: str, outcome: OperationOutcome
+        self,
+        payment_id: str,
+        operation_id: str,
+        outcome: OperationOutcome,
+        *,
+        submission_response: bool = False,
     ) -> OutcomePlan:
         async with self._lock_for(payment_id):
             operations = self._operations.setdefault(payment_id, [])
@@ -138,6 +143,7 @@ class InMemoryDurableRepository:
                 operations[index],
                 outcome,
                 operations=operations,
+                submission_response=submission_response,
             )
             replacements = {
                 record.operation_id: record
@@ -208,7 +214,9 @@ class InMemoryDurableRepository:
             record
             for records in self._operations.values()
             for record in records
-            if record.is_active or record.reconciliation_required
+            if record.is_active
+            or record.reconciliation_required
+            or record.response_pending
         )
 
     async def list_payments_requiring_reconciliation(

@@ -24,7 +24,7 @@ async def test_unavailable_recovery_storage_preserves_original_failure_and_submi
     failure = OSError("final write unavailable")
 
     class Unavailable(InMemoryDurableRepository):
-        async def record_operation_outcome(self, *args):
+        async def record_operation_outcome(self, *args, **kwargs):
             raise failure
 
         async def record_operation_failure(self, *args):
@@ -83,7 +83,7 @@ async def test_ordinary_outcomes_are_not_local_recording_failures_or_settlement(
 
 async def test_recovery_then_operator_resolution_retains_evidence_and_clears_operation_flag():
     class FailedOnce(InMemoryDurableRepository):
-        async def record_operation_outcome(self, *args):
+        async def record_operation_outcome(self, *args, **kwargs):
             raise OSError("storage failure")
 
     repository, flow, intent, _ = await recovery_flow(
@@ -108,8 +108,8 @@ async def test_recovery_then_operator_resolution_retains_evidence_and_clears_ope
 
 async def test_lost_commit_acknowledgement_does_not_downgrade_callback_or_resubmit():
     class LostAcknowledgement(InMemoryDurableRepository):
-        async def record_operation_outcome(self, *args):
-            await super().record_operation_outcome(*args)
+        async def record_operation_outcome(self, *args, **kwargs):
+            await super().record_operation_outcome(*args, **kwargs)
             raise OSError("committed, acknowledgement lost")
 
     repository, flow, intent, calls = await recovery_flow(
@@ -128,6 +128,69 @@ async def test_lost_commit_acknowledgement_does_not_downgrade_callback_or_resubm
     duplicate = await flow.execute_operation("pay", intent, now=NOW)
     assert duplicate.outcome is OperationState.SUCCEEDED
     assert len(calls) == 1
+
+
+async def test_callback_completion_cannot_hide_unrecorded_response_after_storage_outage():
+    from getpaid_core.durable import OperationCapabilities
+    from getpaid_core.durable import OperationIntent
+    from tests.conftest import MockProcessor
+    from tests.test_durable_dispatch import make_flow
+
+    class Unavailable(InMemoryDurableRepository):
+        async def record_operation_outcome(self, *args, **kwargs):
+            raise OSError("result storage unavailable")
+
+        async def record_operation_failure(self, *args):
+            raise OSError("recovery storage unavailable")
+
+    class CallbackFirst(MockProcessor):
+        operation_capabilities = {OperationType.CHARGE: OperationCapabilities()}
+
+        @classmethod
+        async def submit_operation(cls, operation, *, config):
+            await repository.apply_observation(
+                "pay",
+                PaymentObservation(
+                    operation_id=operation.operation_id,
+                    outcome=OperationOutcome(
+                        OperationState.SUCCEEDED, settled_amount=Decimal("20")
+                    ),
+                ),
+            )
+            return OperationOutcome(
+                OperationState.SUCCEEDED, settled_amount=Decimal("30")
+            )
+
+    from getpaid_core.durable import PaymentFacts
+
+    repository = Unavailable(
+        [
+            PaymentFacts(
+                "pay",
+                Decimal("100"),
+                backend=CallbackFirst.slug,
+                remaining_authorization=Decimal("100"),
+                status="pre-auth",
+            )
+        ]
+    )
+    _, flow = make_flow(
+        CallbackFirst,
+        repository=repository,
+        restricted_operations=frozenset({OperationType.CHARGE}),
+    )
+    with pytest.raises(OperationPersistenceError):
+        await flow.execute_operation(
+            "pay",
+            OperationIntent("intent", OperationType.CHARGE, Decimal("30")),
+            now=NOW,
+        )
+    discovered = await repository.list_unresolved_operations()
+    assert [record.operation_id for record in discovered] == ["intent"]
+    assert discovered[0].state is OperationState.SUCCEEDED
+    assert (
+        await repository.get_payment_facts("pay")
+    ).captured_funds == Decimal("20")
 
 
 async def test_flagged_terminal_operation_can_still_be_queried_without_resubmission():

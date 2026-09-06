@@ -225,7 +225,10 @@ class DurablePaymentFlow(BaseFlow):
                 )
             outcome = normalize_outcome(outcome)
             plan = await self.repository.record_operation_outcome(
-                operation.payment_id, operation.operation_id, outcome
+                operation.payment_id,
+                operation.operation_id,
+                outcome,
+                submission_response=True,
             )
         except (InvalidTransitionError, OperationConflictError) as exc:
             context["recovery_recorded"] = await self._retain_failure(
@@ -315,7 +318,9 @@ class DurablePaymentFlow(BaseFlow):
                 "No reserved operation with that identity."
             )
         if (
-            not operation.is_active and not operation.reconciliation_required
+            not operation.is_active
+            and not operation.reconciliation_required
+            and not operation.response_pending
         ) or operation.state is OperationState.RESERVED:
             return await self._operation_result(operation)
         processor = self.registry.get_by_slug(operation.backend)

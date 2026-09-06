@@ -24,7 +24,7 @@ these, listed in `getpaid_core.durable.MANDATORY_OPERATIONS`:
 | `reserve_operation(payment_id, intent)` | Commit a reservation against current facts; resume an identical intent instead of duplicating it |
 | `claim_submission(payment_id, operation_id, *, expected_attempt, now, retry_until=None, idempotency_scope=None)` | Atomically grant one submission attempt and persist `SUBMITTING` before provider I/O; compare the attempt counter, preserve the original retry window |
 | `apply_observation(payment_id, update)` | Apply a normalized observation to current state and return the committed plan |
-| `record_operation_outcome(payment_id, operation_id, outcome)` | Commit an operation's outcome together with the financial facts it settles |
+| `record_operation_outcome(payment_id, operation_id, outcome, *, submission_response=False)` | Commit outcome and financial effects; pass the flag to `plan_outcome` to retire acknowledged response work atomically |
 | `record_operation_failure(payment_id, operation_id, evidence)` | Apply `plan_operation_failure` atomically to the current operation; retain safe claims and flag reconciliation without moving money |
 | `resolve_operation(payment_id, operation_id, resolution, *, expected_operation, expected_facts)` | Apply `plan_resolution` against reviewed/current snapshots and complete history; commit audit, facts and affected operations atomically |
 | `get_operation(payment_id, operation_id)` | Return one committed operation record |
@@ -281,6 +281,18 @@ If it fails or times out, the original error still wins and the pre-submission
 record remains the recovery anchor. Failed acknowledgement does not prove that
 either local write rolled back.
 
+Every submission claim also sets `OperationRecord.response_pending=True` atomically.
+This tracks unrecorded command-response work independently of provider settlement.
+Callbacks preserve it, including when they establish a terminal outcome. Only a
+committed command/query response (`record_operation_outcome(...,
+submission_response=True)`) or an audited operator resolution clears it. Adapters
+must pass this flag through to `plan_outcome` and commit the resulting marker with
+facts and all affected operations; never infer it from operation status.
+`list_unresolved_operations()` includes response-pending terminal records, and they
+block unrelated reservations. Thus, when a callback completes before both response
+and recovery writes fail, the intent remains restart-discoverable. Queries can
+inspect response-pending terminal records without resubmitting them.
+
 The retention write preserves the current operation state, including a callback
 or commit that already established settlement. It appends unique safe claims to
 `OperationRecord.recovery_evidence`, flags that operation for reconciliation, and
@@ -352,6 +364,9 @@ provider payloads. `resolved_at` is timezone-aware audit time, **not** proof tha
 execution did or did not occur. Decisions require `SUCCEEDED` or `REJECTED`, never
 pending/unknown or a reconciliation-required outcome. Core supplies mechanics,
 not authorization, evidence verification, an operator UI, a queue or a scheduler.
+Before a manual decision retires response-pending work, the integration must ensure
+no submitting worker remains in flight for that intent; an audit cannot stop a
+remote command or fence a worker. Use trustworthy query/callback evidence first.
 
 The repository compares reviewed facts/operation inside its atomic boundary.
 A changed snapshot raises `StateConflictError`; review again rather than blindly
@@ -518,6 +533,12 @@ event scope and history. A digest alone cannot reconstruct that evidence. If it
 is unavailable, mutation-block affected payments and reconcile before resuming;
 never blindly discard old trusted history or treat old events as unseen. Do not
 mix old/new digest writers, or roll back to writers that erase new evidence fields.
+
+Adapters must round-trip the boolean `OperationRecord.response_pending`, set on
+every claim and preserved by callbacks. On upgrade, an existing submitted record
+without proven response acknowledgement must conservatively be marked True,
+including terminal records; false is safe only when no claim or an acknowledged
+response is established. Never infer acknowledgement solely from settlement.
 
 Adapters must additionally round-trip `OperationRecord.recovery_evidence` and
 `OperationRecord.resolutions` (both default `()`), including every safe evidence

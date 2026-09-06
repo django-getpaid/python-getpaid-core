@@ -71,6 +71,12 @@ Audit strings are printable, nonempty and at most 2000 characters. Application
 access control and evidence verification are mandatory integration responsibilities.
 The original exception chain and returned snapshot are not safe logging payloads.
 
+`OperationRecord.response_pending` defaults to False on new records and becomes
+True with each submission claim. Terminal callbacks preserve it; discovery includes
+it regardless of settlement. Only `record_operation_outcome(...,
+submission_response=True)` or audited resolution retires it atomically. Upgrading
+submitted records without proof of acknowledgement requires conservative True.
+
 `OperationRecord.recovery_evidence` and `.resolutions` default to immutable empty
 tuples. Preserve them on every write and during serialization. A repeated resolution
 ID with the same decision returns current state without duplicating money/audit;

@@ -577,6 +577,46 @@ async def check_observations_commit_operations_and_disputes(
     )
 
 
+async def check_callback_cannot_retire_response(
+    factory: RepositoryFactory,
+) -> None:
+    """Settlement is not acknowledgement of the submitting worker's response."""
+    repository = await factory(_authorized_facts())
+    await repository.reserve_operation(
+        PAYMENT_ID, OperationIntent("capture", OperationType.CHARGE)
+    )
+    await repository.claim_submission(
+        PAYMENT_ID,
+        "capture",
+        expected_attempt=0,
+        now=datetime(2026, 9, 6, tzinfo=UTC),
+    )
+    await repository.apply_observation(
+        PAYMENT_ID,
+        PaymentObservation(
+            operation_id="capture",
+            outcome=OperationOutcome(OperationState.SUCCEEDED),
+        ),
+    )
+    operation = await repository.get_operation(PAYMENT_ID, "capture")
+    assert operation is not None
+    _require(operation.response_pending, "callback erased pending response")
+    _require(
+        operation in await repository.list_unresolved_operations(),
+        "terminal response work vanished from discovery",
+    )
+    await repository.record_operation_outcome(
+        PAYMENT_ID,
+        "capture",
+        OperationOutcome(OperationState.SUCCEEDED),
+        submission_response=True,
+    )
+    _require(
+        not await repository.list_unresolved_operations(),
+        "committed response acknowledgement did not retire pending work",
+    )
+
+
 async def check_recovery_and_resolution_are_retained(
     factory: RepositoryFactory,
 ) -> None:
@@ -653,6 +693,10 @@ async def check_recovery_and_resolution_are_retained(
 CONFORMANCE_CHECKS: tuple[
     tuple[str, Callable[[RepositoryFactory], Awaitable[None]]], ...
 ] = (
+    (
+        "callback_cannot_retire_response",
+        check_callback_cannot_retire_response,
+    ),
     (
         "recovery_and_resolution_are_retained",
         check_recovery_and_resolution_are_retained,

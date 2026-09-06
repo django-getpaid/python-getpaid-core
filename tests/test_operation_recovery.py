@@ -96,7 +96,7 @@ async def test_post_provider_failure_retains_normalized_evidence_and_intent(
     operation_type, state, failure
 ):
     class FailedWrite(InMemoryDurableRepository):
-        async def record_operation_outcome(self, *args):
+        async def record_operation_outcome(self, *args, **kwargs):
             raise failure
 
     outcome = OperationOutcome(state, correlation="provider-1")
