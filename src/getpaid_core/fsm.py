@@ -203,18 +203,10 @@ def require_capture_eligible(payment: Payment) -> None:
 
 
 def require_capture_recordable(payment: Payment) -> None:
-    """Refuse capture *evidence* the payment cannot represent.
+    """Guard legacy charge-request notifications, not settled capture facts.
 
-    Applying an observation is not authorizing a command, so this is much
-    narrower than :func:`require_capture_eligible`: an equal or lower
-    cumulative capture reported alongside refund progress is absorbed
-    without regressing either total (ADR 0001, section 5), and a partially
-    refunded payment still records capture evidence.
-
-    What stays refused is evidence the released contract has never
-    accepted: a capture while a refund is unresolved, and a capture on a
-    payment whose captured funds have all been returned. Reconciling those
-    against competing cross-channel evidence is separate work.
+    Cumulative PAYMENT_CAPTURED evidence is governed by monetary bounds
+    and truthful status projection, never command eligibility.
     """
     if has_unresolved_refund(payment):
         raise InvalidTransitionError(
@@ -363,13 +355,15 @@ def _apply_payment_event(payment: Payment, update: PaymentUpdate) -> None:
         )
 
     if event is PaymentEvent.PAYMENT_CAPTURED:
-        require_capture_recordable(payment)
+        refund_in_progress = has_unresolved_refund(payment)
         if update.paid_amount is None:
             raise InvalidTransitionError(
                 "PAYMENT_CAPTURED event requires explicit paid_amount."
             )
         _set_paid_amount(payment, update.paid_amount)
-        payment.status = project_payment_status(payment)
+        payment.status = project_payment_status(
+            payment, refund_in_progress=refund_in_progress
+        )
         return
 
     if event is PaymentEvent.FAILED:

@@ -97,7 +97,10 @@ def _canonical_amount(amount: Decimal | None) -> str:
     """Render an amount so ``100`` and ``100.00`` compare as one value."""
     if amount is None:
         return ""
-    return format(amount.normalize(), "f")
+    rendered = format(amount, "f")
+    if "." in rendered:
+        rendered = rendered.rstrip("0").rstrip(".")
+    return "0" if amount == 0 else rendered
 
 
 def _canonical_parameter(value: Any) -> Any:
@@ -231,6 +234,10 @@ class PaymentFacts:
     unique within, and it is read from stored facts rather than from a
     caller's object.
 
+    ``observation_conflicts`` retains compact normalized disputed claims.
+    Preserve it on every write and through serialization, independently of
+    provider metadata. It is evidence for investigation, not applied money.
+
     ``provider_data`` is unrestricted plugin metadata. It holds no
     core-owned bookkeeping: replay evidence is a separate
     :class:`ReplayRecord`, so nothing a processor writes here can seed,
@@ -249,6 +256,7 @@ class PaymentFacts:
     fraud_message: str = ""
     reconciliation_required: bool = False
     provider_data: Mapping[str, Any] = field(default=EMPTY_METADATA)
+    observation_conflicts: tuple["ObservationConflict", ...] = ()
 
     def __post_init__(self) -> None:
         validate_provider_metadata(self.provider_data, name="Payment metadata")
@@ -306,8 +314,8 @@ class ReplayRecord:
         )
 
 
-def observation_digest(update: PaymentUpdate) -> str:
-    """Digest the semantic content of an observation.
+def observation_content(update: PaymentUpdate) -> str:
+    """Serialize allowlisted semantic evidence, excluding provider metadata.
 
     Only core-owned semantic fields take part: the provider payload in
     ``provider_data`` is deliberately excluded, so a retransmission that
@@ -322,7 +330,43 @@ def observation_digest(update: PaymentUpdate) -> str:
         update.external_id or "",
         update.fraud_message or "",
     )
-    return sha256("\x1f".join(parts).encode()).hexdigest()
+    if isinstance(update, PaymentObservation) and (
+        update.operation_id is not None
+        or update.outcome is not None
+        or update.cancellation_scope is not None
+        or update.delta_only
+    ):
+        outcome = update.outcome
+        parts += (
+            update.operation_id or "",
+            str(update.cancellation_scope or ""),
+            str(update.delta_only),
+            str(outcome.state) if outcome else "",
+            _canonical_amount(outcome.settled_amount) if outcome else "",
+            (outcome.correlation or "") if outcome else "",
+            str(outcome.reconciliation_required) if outcome else "",
+            (outcome.external_id or "") if outcome else "",
+        )
+    return json.dumps(parts, ensure_ascii=True, separators=(",", ":"))
+
+
+def observation_digest(update: PaymentUpdate) -> str:
+    """Hash normalized semantic content with unambiguous field boundaries."""
+    return sha256(observation_content(update).encode()).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class ObservationConflict:
+    """Compact disputed evidence, separate from financial facts and metadata.
+
+    ``semantic_content`` is JSON containing only core-defined observation
+    fields, not raw provider payloads. Preserve it for investigation; a digest
+    alone cannot recover the financial claim that was refused.
+    """
+
+    event_identity: str | None
+    semantic_content: str
+    reason: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -455,21 +499,48 @@ class OperationOutcome:
             ) from exc
 
 
+@dataclass(slots=True)
+class PaymentObservation(PaymentUpdate):
+    """Authenticated cross-channel evidence, optionally tied to an intent.
+
+    A processor supplies ``operation_id`` only from a verified provider echo
+    of the merchant identity. Alternatively ``outcome.correlation`` must
+    uniquely match a retained provider handle. Equal amounts and the active
+    operation are never correlation. Aggregate amounts remain cumulative;
+    ``outcome.settled_amount`` describes only the identified operation.
+    Set ``delta_only`` when supplied money is an isolated increment; it never
+    accumulates directly. A matching outcome and retained reservation must
+    establish the total, or the evidence requires reconciliation.
+    ``cancellation_scope=RELEASE_LOCK`` explicitly confirms release of this
+    payment's remaining authorization. Refund cancellation instead requires a
+    correlated outcome tied to a reserved cancellation or refund intent.
+    """
+
+    operation_id: str | None = None
+    outcome: OperationOutcome | None = None
+    cancellation_scope: OperationType | None = None
+    delta_only: bool = False
+
+
 @dataclass(frozen=True, slots=True)
 class ObservationPlan:
     """What an adapter must commit for one provider observation.
 
-    ``facts`` and ``replay_record`` commit together or not at all. When
+    ``facts``, ``replay_record`` and every record in ``operations`` commit
+    together or not at all. The planner needs the complete retained operation
+    history, not just active intents. When
     ``applied`` is false the observation added no new financial evidence,
     but ``facts`` may still differ from what was read -- a reused event
-    identity carrying different content sets
+    identity carrying different content retains a dispute and sets
     ``facts.reconciliation_required`` -- so the adapter commits ``facts``
-    either way.
+    either way. Financial-bound violations likewise retain disputed evidence
+    without recording impossible money or an applied-event replay record.
     """
 
     facts: PaymentFacts
     replay_record: ReplayRecord | None
     applied: bool
+    operations: tuple[OperationRecord, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

@@ -103,5 +103,7 @@ def test_impossible_transition_is_an_error_not_a_silent_skip():
         status=PaymentStatus.REFUNDED,
     )
 
-    with pytest.raises(InvalidTransitionError, match="capture"):
-        plan_observation(committed, (), capture_observation("100.00", "late"))
+    with pytest.raises(InvalidTransitionError, match="fail"):
+        plan_observation(
+            committed, (), PaymentUpdate(payment_event=PaymentEvent.FAILED)
+        )

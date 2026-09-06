@@ -20,6 +20,7 @@ from getpaid_core._amounts import validate_payment_amounts
 from getpaid_core.durable.records import CANCELLATION_CORRELATION
 from getpaid_core.durable.records import CANCELLATION_TARGET
 from getpaid_core.durable.records import TERMINAL_OPERATION_STATES
+from getpaid_core.durable.records import ObservationConflict
 from getpaid_core.durable.records import ObservationPlan
 from getpaid_core.durable.records import OperationIntent
 from getpaid_core.durable.records import OperationOutcome
@@ -28,11 +29,14 @@ from getpaid_core.durable.records import OperationState
 from getpaid_core.durable.records import OperationType
 from getpaid_core.durable.records import OutcomePlan
 from getpaid_core.durable.records import PaymentFacts
+from getpaid_core.durable.records import PaymentObservation
 from getpaid_core.durable.records import ReplayRecord
 from getpaid_core.durable.records import ReservationPlan
 from getpaid_core.durable.records import SubmissionPlan
+from getpaid_core.durable.records import observation_content
 from getpaid_core.durable.records import validate_event_identity
 from getpaid_core.durable.records import validate_provider_metadata
+from getpaid_core.enums import FraudEvent
 from getpaid_core.enums import PaymentEvent
 from getpaid_core.enums import PaymentStatus
 from getpaid_core.exceptions import InvalidTransitionError
@@ -80,6 +84,7 @@ class _FactsPayment:
         self.provider_data: dict[str, Any] = dict(facts.provider_data)
         self._payment_id = facts.payment_id
         self._reconciliation_required = facts.reconciliation_required
+        self._observation_conflicts = facts.observation_conflicts
 
     def to_facts(self) -> PaymentFacts:
         return PaymentFacts(
@@ -95,6 +100,7 @@ class _FactsPayment:
             fraud_message=self.fraud_message,
             reconciliation_required=self._reconciliation_required,
             provider_data=self.provider_data,
+            observation_conflicts=self._observation_conflicts,
         )
 
 
@@ -106,16 +112,255 @@ def _apply_to_facts(facts: PaymentFacts, update: PaymentUpdate) -> PaymentFacts:
     the provider metadata mapping.
     """
     view = _FactsPayment(facts)
+    if (
+        update.paid_amount is not None
+        and update.paid_amount < facts.captured_funds
+    ):
+        # This snapshot's hold predates already-recorded capture. Validate its
+        # own bounds, but never reinstate that historical authorization.
+        update = replace(
+            update,
+            locked_amount=None,
+            payment_event=(
+                None
+                if update.payment_event is PaymentEvent.LOCKED
+                else update.payment_event
+            ),
+        )
+    event = update.payment_event
+    # Financial fields are independent cumulative claims, not payloads owned
+    # exclusively by the event label. Apply capture before refund so a single
+    # snapshot can establish both, then process other valid information.
+    for financial_update in (
+        PaymentUpdate(
+            payment_event=PaymentEvent.PAYMENT_CAPTURED,
+            paid_amount=update.paid_amount,
+        ),
+        PaymentUpdate(
+            payment_event=PaymentEvent.REFUND_CONFIRMED,
+            refunded_amount=update.refunded_amount,
+        ),
+    ):
+        if (
+            financial_update.refunded_amount is not None
+            and financial_update.refunded_amount <= view.amount_refunded
+            and event is not PaymentEvent.REFUND_CONFIRMED
+        ):
+            # A snapshot's equal/older total is not a new refund confirmation.
+            continue
+        if (
+            financial_update.paid_amount is not None
+            or financial_update.refunded_amount is not None
+        ):
+            apply_payment_update(cast("Payment", view), financial_update)
+            if event is financial_update.payment_event:
+                event = None
+    if (
+        event is PaymentEvent.LOCK_RELEASED
+        and isinstance(update, PaymentObservation)
+        and update.cancellation_scope is OperationType.RELEASE_LOCK
+        and view.amount_locked == 0
+    ):
+        # The accompanying capture may have exhausted the hold. A scoped
+        # release then acknowledges current facts, just as a later one would.
+        event = None
     apply_payment_update(
-        cast("Payment", view), replace(update, provider_event_id=None)
+        cast("Payment", view),
+        replace(
+            update,
+            provider_event_id=None,
+            payment_event=event,
+            paid_amount=None,
+            refunded_amount=None,
+        ),
     )
-    return view.to_facts()
+    result = view.to_facts()
+    if (
+        facts.status == PaymentStatus.REFUND_STARTED
+        and update.payment_event
+        not in {PaymentEvent.REFUND_CONFIRMED, PaymentEvent.REFUND_CANCELLED}
+    ):
+        # Externally initiated pending work may have no local operation record.
+        # Aggregate money alone cannot establish that the whole refund resolved.
+        result = replace(result, status=PaymentStatus.REFUND_STARTED)
+    if result.captured_funds > facts.captured_funds and (
+        facts.refunded_funds > 0 or facts.status == PaymentStatus.REFUND_STARTED
+    ):
+        result = replace(result, reconciliation_required=True)
+    return result
+
+
+def _retain_observation(
+    facts: PaymentFacts, update: PaymentUpdate, reason: str
+) -> PaymentFacts:
+    evidence = ObservationConflict(
+        update.provider_event_id, observation_content(update), reason
+    )
+    conflicts = facts.observation_conflicts
+    if evidence not in conflicts:
+        conflicts = (*conflicts, evidence)
+    return replace(
+        facts, reconciliation_required=True, observation_conflicts=conflicts
+    )
+
+
+def _validate_observation(update: PaymentUpdate) -> None:
+    validate_provider_metadata(
+        update.provider_data, name="Observation metadata"
+    )
+    validate_event_identity(update.provider_event_id)
+    if (
+        update.payment_event is PaymentEvent.LOCKED
+        and update.locked_amount is None
+    ):
+        raise InvalidTransitionError(
+            "LOCKED event requires explicit locked_amount."
+        )
+    for amount in (
+        update.paid_amount,
+        update.refunded_amount,
+        update.locked_amount,
+    ):
+        if amount is not None and (
+            not isinstance(amount, Decimal) or not amount.is_finite()
+        ):
+            raise InvalidTransitionError(
+                "Observation amounts must be finite Decimals."
+            )
+    for name in ("external_id", "fraud_message"):
+        value = getattr(update, name)
+        if value is not None and not isinstance(value, str):
+            raise InvalidTransitionError(
+                f"Observation {name} must be a string."
+            )
+    for value, enum in (
+        (update.payment_event, PaymentEvent),
+        (update.fraud_event, FraudEvent),
+    ):
+        if value is not None and not isinstance(value, enum):
+            raise InvalidTransitionError(
+                "Observation event must be normalized."
+            )
+    if not isinstance(update, PaymentObservation):
+        return
+    if update.operation_id is not None and (
+        not isinstance(update.operation_id, str)
+        or not update.operation_id.strip()
+    ):
+        raise InvalidTransitionError(
+            "Observation operation_id must be nonempty."
+        )
+    if type(update.delta_only) is not bool:
+        raise InvalidTransitionError(
+            "Observation delta_only must be a boolean."
+        )
+    if update.cancellation_scope is not None and (
+        update.cancellation_scope is not OperationType.RELEASE_LOCK
+        or update.payment_event is not PaymentEvent.LOCK_RELEASED
+    ):
+        raise InvalidTransitionError(
+            "Unsupported observation cancellation scope."
+        )
+    if update.outcome is None:
+        if update.operation_id is not None:
+            raise InvalidTransitionError(
+                "Operation identity requires an outcome."
+            )
+        return
+    if not isinstance(update.outcome, OperationOutcome):
+        raise InvalidTransitionError("Observation outcome must be normalized.")
+    outcome = update.outcome
+    if type(outcome.reconciliation_required) is not bool:
+        raise InvalidTransitionError(
+            "Outcome reconciliation must be a boolean."
+        )
+    for value in (outcome.correlation, outcome.external_id):
+        if value is not None and (
+            not isinstance(value, str) or not value.strip()
+        ):
+            raise InvalidTransitionError(
+                "Outcome handles must be nonempty strings."
+            )
+    if outcome.state not in {
+        OperationState.SUCCEEDED,
+        OperationState.REJECTED,
+        OperationState.PROVIDER_PENDING,
+        OperationState.UNKNOWN,
+    }:
+        raise InvalidTransitionError(
+            "An outcome must describe provider evidence."
+        )
+    if outcome.settled_amount is not None and (
+        not isinstance(outcome.settled_amount, Decimal)
+        or not outcome.settled_amount.is_finite()
+        or outcome.state is not OperationState.SUCCEEDED
+    ):
+        raise InvalidTransitionError(
+            "Only settlement carries a finite Decimal."
+        )
+
+
+def _financial_observation_is_possible(
+    facts: PaymentFacts, update: PaymentUpdate
+) -> bool:
+    amounts = (update.paid_amount, update.refunded_amount, update.locked_amount)
+    captured = max(facts.captured_funds, update.paid_amount or Decimal("0"))
+    snapshot_capture = (
+        captured if update.paid_amount is None else update.paid_amount
+    )
+    return (
+        all(amount is None or amount >= 0 for amount in amounts)
+        and captured <= facts.amount_required
+        and (
+            update.refunded_amount is None or update.refunded_amount <= captured
+        )
+        and (
+            update.locked_amount is None
+            or (
+                0
+                < update.locked_amount
+                <= facts.amount_required - snapshot_capture
+            )
+        )
+    )
+
+
+def _delta_matches_outcome(
+    update: PaymentObservation, operation: OperationRecord
+) -> bool:
+    if not update.delta_only:
+        return True
+    outcome = update.outcome
+    assert outcome is not None
+    settled = (
+        operation.resolved_amount
+        if outcome.settled_amount is None
+        else outcome.settled_amount
+    )
+    expected = (
+        (settled, None, None)
+        if operation.operation_type is OperationType.CHARGE
+        else (None, settled, None)
+        if operation.operation_type is OperationType.START_REFUND
+        else (None, None, None)
+    )
+    return all(
+        actual is None
+        or (outcome.state is OperationState.SUCCEEDED and actual == confirmed)
+        for actual, confirmed in zip(
+            (update.paid_amount, update.refunded_amount, update.locked_amount),
+            expected,
+            strict=True,
+        )
+    )
 
 
 def plan_observation(
     facts: PaymentFacts,
     replay_log: Iterable[ReplayRecord],
     update: PaymentUpdate | None,
+    *,
+    operations: Iterable[OperationRecord] = (),
 ) -> ObservationPlan:
     """Plan the atomic application of one provider observation.
 
@@ -126,20 +371,19 @@ def plan_observation(
     carrying different semantic content is refused and flagged for
     reconciliation rather than silently suppressing a financial change.
 
-    Raises ``InvalidTransitionError`` for evidence that cannot be applied
-    to the current state, and for malformed metadata or a malformed event
-    identity: an impossible transition stays an error rather than a
-    blanket ignored exception, and rejecting before anything is planned
-    is what leaves committed funds and committed history untouched.
+    ``operations`` is the complete retained history read in the same atomic
+    boundary. Correlated outcomes return affected records in the plan; an
+    uncorrelated aggregate never resolves an arbitrary active operation.
+    Financial-bound violations and ambiguous evidence are retained with a
+    reconciliation requirement, without forcing impossible money into facts.
+    Malformed fields and genuinely impossible lifecycle transitions raise
+    ``InvalidTransitionError`` before any plan can commit.
     """
     if update is None:
         return ObservationPlan(facts=facts, replay_record=None, applied=False)
 
-    validate_provider_metadata(
-        update.provider_data, name="Observation metadata"
-    )
+    _validate_observation(update)
     identity = validate_event_identity(update.provider_event_id)
-
     record: ReplayRecord | None = None
     if identity is not None:
         record = ReplayRecord.for_observation(facts, update)
@@ -151,15 +395,104 @@ def plan_observation(
                     facts=facts, replay_record=None, applied=False
                 )
             return ObservationPlan(
-                facts=replace(facts, reconciliation_required=True),
+                facts=_retain_observation(
+                    facts, update, "conflicting_identity"
+                ),
                 replay_record=None,
                 applied=False,
             )
 
+    if not _financial_observation_is_possible(facts, update):
+        return ObservationPlan(
+            facts=_retain_observation(facts, update, "financial_constraints"),
+            replay_record=None,
+            applied=False,
+        )
+    operations = tuple(operations)
+    changed: tuple[OperationRecord, ...] = ()
+    aggregate = update
+    # Operation lifecycle is resolved by correlated evidence below, not a
+    # payment-wide request label that could reopen a completed operation.
+    if (
+        isinstance(update, PaymentObservation)
+        and update.outcome is not None
+        and update.payment_event
+        not in {PaymentEvent.FAILED, PaymentEvent.LOCKED}
+    ):
+        aggregate = replace(update, payment_event=None)
+    if isinstance(update, PaymentObservation) and update.delta_only:
+        aggregate = replace(
+            update,
+            paid_amount=None,
+            refunded_amount=None,
+            locked_amount=None,
+            payment_event=(
+                update.payment_event
+                if update.payment_event is PaymentEvent.FAILED
+                else None
+            ),
+        )
+        if update.outcome is None:
+            facts = _retain_observation(facts, update, "unresolved_delta")
+    if update.payment_event in {
+        PaymentEvent.LOCK_RELEASED,
+        PaymentEvent.REFUND_CANCELLED,
+    }:
+        scoped_release = (
+            isinstance(update, PaymentObservation)
+            and update.cancellation_scope is OperationType.RELEASE_LOCK
+            and update.payment_event is PaymentEvent.LOCK_RELEASED
+        )
+        correlated_outcome = (
+            isinstance(update, PaymentObservation)
+            and update.outcome is not None
+        )
+        if not scoped_release and not correlated_outcome:
+            facts = _retain_observation(facts, update, "ambiguous_cancellation")
+        if not scoped_release:
+            aggregate = replace(aggregate, payment_event=None)
+    if (
+        facts.external_id is not None
+        and aggregate.external_id is not None
+        and aggregate.external_id != facts.external_id
+    ):
+        # Compare with committed identity before any envelope can replace it;
+        # correlated outcome validation must see that same trusted baseline.
+        facts = _retain_observation(facts, update, "conflicting_external_id")
+        aggregate = replace(aggregate, external_id=None)
+    result = _apply_to_facts(facts, aggregate)
+    if isinstance(update, PaymentObservation) and update.outcome is not None:
+        candidates = [
+            operation
+            for operation in operations
+            if operation.payment_id == facts.payment_id
+            and operation.backend == facts.backend
+            and (
+                operation.operation_id == update.operation_id
+                if update.operation_id is not None
+                else update.outcome.correlation is not None
+                and operation.correlation == update.outcome.correlation
+            )
+        ]
+        if len(candidates) != 1:
+            result = _retain_observation(result, update, "uncorrelated_outcome")
+        elif not _delta_matches_outcome(update, candidates[0]):
+            result = _retain_observation(result, update, "conflicting_delta")
+        else:
+            outcome_plan = plan_outcome(
+                result, candidates[0], update.outcome, operations=operations
+            )
+            result = outcome_plan.facts
+            changed = (outcome_plan.operation, *outcome_plan.related_operations)
+    replacements = {operation.operation_id: operation for operation in changed}
+    if any(
+        replacements.get(operation.operation_id, operation).is_active
+        and operation.operation_type is OperationType.START_REFUND
+        for operation in operations
+    ):
+        result = replace(result, status=PaymentStatus.REFUND_STARTED)
     return ObservationPlan(
-        facts=_apply_to_facts(facts, update),
-        replay_record=record,
-        applied=True,
+        facts=result, replay_record=record, applied=True, operations=changed
     )
 
 
@@ -514,6 +847,30 @@ def _confirmed_refund_total(
     return cumulative
 
 
+def _disputed_outcome(
+    facts: PaymentFacts, operation: OperationRecord, outcome: OperationOutcome
+) -> OutcomePlan:
+    """Retain only normalized disputed evidence, never plugin attributes."""
+    evidence = OperationOutcome(
+        state=outcome.state,
+        settled_amount=outcome.settled_amount,
+        correlation=outcome.correlation,
+        reconciliation_required=outcome.reconciliation_required,
+        external_id=outcome.external_id,
+    )
+    conflicts = operation.conflicting_outcomes
+    if evidence not in conflicts:
+        conflicts = (*conflicts, evidence)
+    return OutcomePlan(
+        facts=replace(facts, reconciliation_required=True),
+        operation=replace(
+            operation,
+            reconciliation_required=True,
+            conflicting_outcomes=conflicts,
+        ),
+    )
+
+
 def plan_outcome(
     facts: PaymentFacts,
     operation: OperationRecord,
@@ -573,6 +930,19 @@ def plan_outcome(
             "Only a confirmed capture or refund carries a settled amount."
         )
     if outcome.state is OperationState.SUCCEEDED:
+        if outcome.settled_amount is not None:
+            if (
+                not isinstance(outcome.settled_amount, Decimal)
+                or not outcome.settled_amount.is_finite()
+            ):
+                raise InvalidTransitionError(
+                    "Settled amount must be a finite Decimal."
+                )
+            if outcome.settled_amount <= 0 or (
+                operation.resolved_amount is not None
+                and outcome.settled_amount > operation.resolved_amount
+            ):
+                return _disputed_outcome(facts, operation, outcome)
         _settlement_update(operation, outcome)
     current = operation.state
     settled = (
@@ -614,17 +984,9 @@ def plan_outcome(
         or conflicting_external_id
         or contradictory_terminal
     ):
-        # Store only normalized fields, never arbitrary provider payloads or
-        # additional attributes on a plugin's outcome subclass.
-        evidence = OperationOutcome(
-            state=outcome.state,
-            settled_amount=outcome.settled_amount,
-            correlation=outcome.correlation,
-            reconciliation_required=outcome.reconciliation_required,
-            external_id=outcome.external_id,
-        )
-        if evidence not in conflicts:
-            conflicts = (*conflicts, evidence)
+        conflicts = _disputed_outcome(
+            facts, operation, outcome
+        ).operation.conflicting_outcomes
     recorded = replace(
         operation,
         correlation=operation.correlation or outcome.correlation,
@@ -696,6 +1058,8 @@ def plan_outcome(
             and facts.status != PaymentStatus.NEW
         ):
             update = replace(update, payment_event=None)
+        if not _financial_observation_is_possible(facts, update):
+            return _disputed_outcome(facts, recorded, outcome)
         facts = _apply_to_facts(facts, update)
         recorded = replace(recorded, settled_amount=settled)
 

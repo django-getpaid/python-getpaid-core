@@ -263,6 +263,18 @@ async def test_invalid_provider_evidence_is_not_a_persistence_error_or_rejection
             return bad_outcome
 
     repository, flow = make_flow(InvalidProvider)
+    if isinstance(bad_outcome, OperationOutcome):
+        result = await flow.execute_operation(
+            "pay", OperationIntent("capture", OperationType.CHARGE), now=NOW
+        )
+        assert result.reconciliation_required
+        assert result.snapshot.captured_funds == 0
+        assert result.operation.state is OperationState.SUBMITTING
+        assert result.operation.conflicting_outcomes == (bad_outcome,)
+        assert (await repository.list_unresolved_operations()) == (
+            result.operation,
+        )
+        return
     with pytest.raises(OperationEvidenceError) as caught:
         await flow.execute_operation(
             "pay", OperationIntent("capture", OperationType.CHARGE), now=NOW
