@@ -557,8 +557,23 @@ def plan_outcome(
         return OutcomePlan(operation=recorded, facts=facts)
     if outcome.external_id is not None:
         facts = replace(facts, external_id=outcome.external_id)
-    if current in TERMINAL_OPERATION_STATES:
+    cancelled_refund_settled = (
+        current is OperationState.REJECTED
+        and outcome.state is OperationState.SUCCEEDED
+        and operation.operation_type is OperationType.START_REFUND
+        and any(
+            candidate.operation_type is OperationType.CANCEL_REFUND
+            and candidate.state is OperationState.SUCCEEDED
+            and candidate.payment_id == operation.payment_id
+            and candidate.parameters.get(CANCELLATION_TARGET) == operation.operation_id
+            for candidate in operations
+        )
+    )
+    if current in TERMINAL_OPERATION_STATES and not cancelled_refund_settled:
         return OutcomePlan(operation=recorded, facts=facts)
+    # A cancellation can only stop the unexecuted part. A later correlated
+    # settlement proves returned funds even if the cancellation arrived first.
+    # Preserve the contradiction flag and record that financial fact.
 
     related: tuple[OperationRecord, ...] = ()
     if outcome.state is OperationState.SUCCEEDED:
