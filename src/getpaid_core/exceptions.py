@@ -75,6 +75,10 @@ class UnsupportedRepositoryError(GetPaidException):
     """
 
 
+class UnsupportedProcessorError(GetPaidException):
+    """The processor has not declared a safe durable operation contract."""
+
+
 class StateConflictError(GetPaidException):
     """A concurrent writer committed first; the plan was built on stale facts.
 

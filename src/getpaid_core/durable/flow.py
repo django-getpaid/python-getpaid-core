@@ -17,6 +17,7 @@ released unconditional-save behaviour. ``PaymentFlow`` remains that
 released path, and the two must not write the same payment state.
 """
 
+from datetime import datetime
 from typing import Any
 
 from getpaid_core.durable.records import ObservationPlan
@@ -49,6 +50,19 @@ class DurablePaymentFlow(BaseFlow):
             registry,
         )
         self.repository: DurablePaymentRepository = repository
+
+    async def execute_operation(
+        self, payment_id: str, intent: OperationIntent, *, now: datetime
+    ) -> OutcomePlan:
+        """Dispatch a durable intent only through an upgraded processor."""
+        from getpaid_core.exceptions import UnsupportedProcessorError
+
+        facts = await self.repository.get_payment_facts(payment_id)
+        processor = self.registry.get_by_slug(facts.backend)
+        raise UnsupportedProcessorError(
+            f"Processor {processor.slug!r} must declare durable operation "
+            "capabilities before submission."
+        )
 
     async def handle_callback(
         self,
