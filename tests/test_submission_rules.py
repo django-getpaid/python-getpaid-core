@@ -285,3 +285,54 @@ def test_cancellation_only_reserves_correlated_provider_pending_refund(
         plan_reservation(facts, (refund, cancellation), intent).operation
         == cancellation
     )
+
+
+@pytest.mark.parametrize("refund_wins", [False, True])
+async def test_cancellation_atomically_resolves_target_without_erasing_refund(
+    refund_wins,
+):
+    facts = authorized_facts(
+        captured_funds=Decimal("100"),
+        remaining_authorization=Decimal("0"),
+        status=PaymentStatus.PAID,
+    )
+    repository = InMemoryDurableRepository([facts])
+    await repository.reserve_operation(
+        "payment-1", OperationIntent("refund-1", OperationType.START_REFUND)
+    )
+    await repository.record_operation_outcome(
+        "payment-1",
+        "refund-1",
+        OperationOutcome(
+            OperationState.PROVIDER_PENDING, correlation="provider-refund"
+        ),
+    )
+    await repository.reserve_operation(
+        "payment-1",
+        OperationIntent(
+            "cancel-1",
+            OperationType.CANCEL_REFUND,
+            parameters={CANCELLATION_TARGET: "refund-1"},
+        ),
+    )
+    if refund_wins:
+        await repository.record_operation_outcome(
+            "payment-1", "refund-1", OperationOutcome(OperationState.SUCCEEDED)
+        )
+    cancelled = await repository.record_operation_outcome(
+        "payment-1", "cancel-1", OperationOutcome(OperationState.SUCCEEDED)
+    )
+    target = await repository.get_operation("payment-1", "refund-1")
+    assert target.state is (
+        OperationState.SUCCEEDED if refund_wins else OperationState.REJECTED
+    )
+    assert cancelled.facts.refunded_funds == (
+        Decimal("100") if refund_wins else Decimal("0")
+    )
+    assert cancelled.facts.captured_funds == Decimal("100")
+    assert cancelled.facts.status is (
+        PaymentStatus.REFUNDED if refund_wins else PaymentStatus.PAID
+    )
+    assert await repository.list_unresolved_operations() == ()
+    assert cancelled.operation.state is OperationState.SUCCEEDED
+    assert await repository.get_payment_facts("payment-1") == cancelled.facts

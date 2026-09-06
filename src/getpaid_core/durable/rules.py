@@ -39,6 +39,7 @@ from getpaid_core.exceptions import OperationConflictError
 from getpaid_core.exceptions import ReconciliationBlockedError
 from getpaid_core.fsm import apply_payment_update
 from getpaid_core.fsm import capturable_amount
+from getpaid_core.fsm import project_payment_status
 from getpaid_core.fsm import refundable_amount
 from getpaid_core.fsm import require_capture_eligible
 from getpaid_core.types import PaymentUpdate
@@ -455,6 +456,8 @@ def plan_outcome(
     facts: PaymentFacts,
     operation: OperationRecord,
     outcome: OperationOutcome,
+    *,
+    operations: Iterable[OperationRecord] = (),
 ) -> OutcomePlan:
     """Plan the atomic recording of an operation outcome.
 
@@ -463,6 +466,7 @@ def plan_outcome(
     outcome -- including ``UNKNOWN`` -- moves no money and leaves the
     operation discoverable as unresolved work.
     """
+    operations = tuple(operations)
     for name in ("correlation", "external_id"):
         value = getattr(outcome, name)
         if value is not None and (
@@ -547,9 +551,29 @@ def plan_outcome(
     if current in TERMINAL_OPERATION_STATES:
         return OutcomePlan(operation=recorded, facts=facts)
 
+    related: tuple[OperationRecord, ...] = ()
     if outcome.state is OperationState.SUCCEEDED:
         update = _settlement_update(operation, outcome)
-        if (
+        if operation.operation_type is OperationType.CANCEL_REFUND:
+            target_id = operation.parameters.get(CANCELLATION_TARGET)
+            target = next(
+                (
+                    record
+                    for record in operations
+                    if record.operation_id == target_id
+                    and record.operation_type is OperationType.START_REFUND
+                    and record.payment_id == facts.payment_id
+                ),
+                None,
+            )
+            if target is None:
+                raise OperationConflictError(
+                    "Cancellation target must be loaded atomically."
+                )
+            if target.is_active:
+                related = (replace(target, state=OperationState.REJECTED),)
+            update = replace(update, payment_event=None)
+        elif (
             operation.operation_type is OperationType.PREPARE
             and facts.status != PaymentStatus.NEW
         ):
@@ -557,7 +581,31 @@ def plan_outcome(
         facts = _apply_to_facts(facts, update)
         recorded = replace(recorded, settled_amount=settled)
 
+    recorded = replace(recorded, state=outcome.state)
+    if operation.operation_type in {
+        OperationType.START_REFUND,
+        OperationType.CANCEL_REFUND,
+    }:
+        replacements = {
+            record.operation_id: record for record in (recorded, *related)
+        }
+        current_operations = [
+            replacements.get(record.operation_id, record)
+            for record in operations
+        ]
+        current_operations.append(recorded)
+        refund_in_progress = any(
+            record.operation_type is OperationType.START_REFUND
+            and record.is_active
+            for record in current_operations
+        )
+        facts = replace(
+            facts,
+            status=project_payment_status(
+                cast("Payment", _FactsPayment(facts)),
+                refund_in_progress=refund_in_progress,
+            ),
+        )
     return OutcomePlan(
-        operation=replace(recorded, state=outcome.state),
-        facts=facts,
+        operation=recorded, facts=facts, related_operations=related
     )

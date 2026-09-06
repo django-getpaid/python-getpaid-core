@@ -490,3 +490,4 @@ class OutcomePlan:
 
     operation: OperationRecord
     facts: PaymentFacts
+    related_operations: tuple[OperationRecord, ...] = ()

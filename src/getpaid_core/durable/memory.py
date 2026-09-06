@@ -120,9 +120,19 @@ class InMemoryDurableRepository:
             operations = self._operations.setdefault(payment_id, [])
             index = self._operation_index(payment_id, operation_id, operations)
             plan = plan_outcome(
-                self._facts[payment_id], operations[index], outcome
+                self._facts[payment_id],
+                operations[index],
+                outcome,
+                operations=operations,
             )
-            operations[index] = plan.operation
+            replacements = {
+                record.operation_id: record
+                for record in (plan.operation, *plan.related_operations)
+            }
+            self._operations[payment_id] = [
+                replacements.get(record.operation_id, record)
+                for record in operations
+            ]
             self._facts[payment_id] = plan.facts
             return plan
 
