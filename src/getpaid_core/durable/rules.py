@@ -287,7 +287,7 @@ def plan_reservation(
                 "operation ID.",
                 context={"operation_id": intent.operation_id},
             )
-        return ReservationPlan(operation=record, created=False)
+        return ReservationPlan(operation=record, created=False, facts=facts)
 
     if facts.reconciliation_required:
         raise ReconciliationBlockedError(
@@ -333,6 +333,11 @@ def plan_reservation(
             backend=facts.backend,
         ),
         created=True,
+        facts=(
+            replace(facts, status=PaymentStatus.REFUND_STARTED)
+            if intent.operation_type is OperationType.START_REFUND
+            else facts
+        ),
     )
 
 
@@ -581,7 +586,13 @@ def plan_outcome(
         facts = _apply_to_facts(facts, update)
         recorded = replace(recorded, settled_amount=settled)
 
-    recorded = replace(recorded, state=outcome.state)
+    next_state = outcome.state
+    if (
+        current is OperationState.PROVIDER_PENDING
+        and next_state is OperationState.UNKNOWN
+    ):
+        next_state = current
+    recorded = replace(recorded, state=next_state)
     if operation.operation_type in {
         OperationType.START_REFUND,
         OperationType.CANCEL_REFUND,

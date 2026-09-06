@@ -336,3 +336,43 @@ async def test_cancellation_atomically_resolves_target_without_erasing_refund(
     assert await repository.list_unresolved_operations() == ()
     assert cancelled.operation.state is OperationState.SUCCEEDED
     assert await repository.get_payment_facts("payment-1") == cancelled.facts
+
+
+async def test_unresolved_refund_status_starts_at_reservation_and_pending_cannot_regress():
+    facts = authorized_facts(
+        captured_funds=Decimal("100"),
+        remaining_authorization=Decimal("0"),
+        status=PaymentStatus.PAID,
+    )
+    repository = InMemoryDurableRepository([facts])
+    await repository.reserve_operation(
+        "payment-1", OperationIntent("refund-1", OperationType.START_REFUND)
+    )
+    assert (
+        await repository.get_payment_facts("payment-1")
+    ).status is PaymentStatus.REFUND_STARTED
+    await repository.claim_submission(
+        "payment-1",
+        "refund-1",
+        expected_attempt=0,
+        now=datetime(2026, 9, 6, tzinfo=UTC),
+    )
+    assert (
+        await repository.get_payment_facts("payment-1")
+    ).status is PaymentStatus.REFUND_STARTED
+    unknown = await repository.record_operation_outcome(
+        "payment-1", "refund-1", OperationOutcome(OperationState.UNKNOWN)
+    )
+    assert unknown.facts.status is PaymentStatus.REFUND_STARTED
+    await repository.record_operation_outcome(
+        "payment-1",
+        "refund-1",
+        OperationOutcome(OperationState.PROVIDER_PENDING),
+    )
+    later_unknown = await repository.record_operation_outcome(
+        "payment-1", "refund-1", OperationOutcome(OperationState.UNKNOWN)
+    )
+    assert later_unknown.operation.state is OperationState.PROVIDER_PENDING
+    assert later_unknown.facts.status is PaymentStatus.REFUND_STARTED
+    assert later_unknown.facts.refunded_funds == Decimal("0")
+    assert later_unknown.facts.captured_funds == Decimal("100")

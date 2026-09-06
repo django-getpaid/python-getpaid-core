@@ -470,6 +470,7 @@ class ReservationPlan:
 
     operation: OperationRecord
     created: bool
+    facts: PaymentFacts | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -71,6 +71,8 @@ class InMemoryDurableRepository:
             plan = plan_reservation(self._facts[payment_id], operations, intent)
             if plan.created:
                 operations.append(plan.operation)
+            if plan.facts is not None:
+                self._facts[payment_id] = plan.facts
             return plan.operation
 
     async def claim_submission(
