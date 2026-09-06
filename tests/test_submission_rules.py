@@ -139,10 +139,16 @@ def test_normalized_outcomes_cannot_claim_unreserved_money(state, amount):
     operation = plan_reservation(
         facts, (), charge_intent(amount=Decimal("40"))
     ).operation
-    with pytest.raises(InvalidTransitionError):
-        plan_outcome(
-            facts, operation, OperationOutcome(state, settled_amount=amount)
-        )
+    outcome = OperationOutcome(state, settled_amount=amount)
+    if state is OperationState.SUCCEEDED:
+        plan = plan_outcome(facts, operation, outcome)
+        assert plan.facts.captured_funds == facts.captured_funds
+        assert plan.facts.reconciliation_required
+        assert plan.operation.state == operation.state
+        assert plan.operation.conflicting_outcomes == (outcome,)
+    else:
+        with pytest.raises(InvalidTransitionError):
+            plan_outcome(facts, operation, outcome)
 
 
 @pytest.mark.parametrize(

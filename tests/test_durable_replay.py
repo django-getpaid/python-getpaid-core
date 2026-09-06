@@ -291,8 +291,8 @@ async def test_failed_atomic_application_leaves_state_untouched():
         await repository.apply_observation(
             "pay-1",
             PaymentUpdate(
-                payment_event=PaymentEvent.PAYMENT_CAPTURED,
-                paid_amount=Decimal("140.00"),
+                payment_event=PaymentEvent.FAILED,
+                paid_amount=Decimal("80.00"),
                 provider_event_id="e-2",
             ),
         )
