@@ -76,12 +76,12 @@ def test_same_operation_id_with_changed_parameters_conflicts():
 
 
 def test_an_outstanding_operation_blocks_an_unrelated_command():
-    reserved = plan_reservation(authorized_facts(), (), charge_intent()).operation
+    reserved = plan_reservation(
+        authorized_facts(), (), charge_intent()
+    ).operation
 
     with pytest.raises(OperationConflictError, match="op-1"):
-        plan_reservation(
-            authorized_facts(), (reserved,), charge_intent("op-2")
-        )
+        plan_reservation(authorized_facts(), (reserved,), charge_intent("op-2"))
 
 
 def test_a_payment_awaiting_reconciliation_refuses_a_new_command():
@@ -104,7 +104,9 @@ def test_reconciliation_blocking_is_a_conflict_with_its_own_remedy():
 
 def test_an_outstanding_operation_still_resumes_while_blocked():
     """Blocking new commands must not strand work already reserved."""
-    reserved = plan_reservation(authorized_facts(), (), charge_intent()).operation
+    reserved = plan_reservation(
+        authorized_facts(), (), charge_intent()
+    ).operation
     blocked = authorized_facts(reconciliation_required=True)
 
     plan = plan_reservation(blocked, (reserved,), charge_intent())
@@ -114,7 +116,9 @@ def test_an_outstanding_operation_still_resumes_while_blocked():
 
 
 def test_an_outstanding_operation_still_resolves_while_blocked():
-    reserved = plan_reservation(authorized_facts(), (), charge_intent()).operation
+    reserved = plan_reservation(
+        authorized_facts(), (), charge_intent()
+    ).operation
     blocked = authorized_facts(reconciliation_required=True)
 
     plan = plan_outcome(

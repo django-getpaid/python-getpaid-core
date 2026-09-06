@@ -172,9 +172,7 @@ def _resolve_amount(
 
     if operation_type is OperationType.RELEASE_LOCK:
         available = facts.remaining_authorization
-        validate_amount(
-            available, "Remaining authorization", allow_zero=False
-        )
+        validate_amount(available, "Remaining authorization", allow_zero=False)
         if intent.amount is not None and intent.amount != available:
             raise InvalidTransitionError(
                 "Authorization release covers the whole remaining "

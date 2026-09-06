@@ -29,14 +29,15 @@ from dataclasses import dataclass
 from dataclasses import field
 from decimal import Decimal
 from enum import StrEnum
-from types import MappingProxyType
 from typing import TYPE_CHECKING
 from typing import Any
 from typing import cast
 
 from getpaid_core._amounts import validate_payment_amounts
+from getpaid_core.durable.records import EMPTY_METADATA
 from getpaid_core.durable.records import LEGACY_REPLAY_METADATA_KEYS
 from getpaid_core.durable.records import PaymentFacts
+from getpaid_core.durable.records import freeze_metadata
 from getpaid_core.durable.records import validate_provider_metadata
 from getpaid_core.enums import FraudStatus
 from getpaid_core.enums import PaymentStatus
@@ -46,8 +47,6 @@ from getpaid_core.exceptions import InvalidTransitionError
 if TYPE_CHECKING:
     from getpaid_core.protocols import Payment
 
-
-_EMPTY: Mapping[str, Any] = MappingProxyType({})
 
 _AMOUNT_FIELDS = (
     "amount_required",
@@ -119,18 +118,14 @@ class LegacyPaymentState:
     external_id: str | None = None
     fraud_status: str = FraudStatus.UNKNOWN
     fraud_message: str = ""
-    provider_data: Mapping[str, Any] = field(default=_EMPTY)
+    provider_data: Mapping[str, Any] = field(default=EMPTY_METADATA)
 
     def __post_init__(self) -> None:
         validate_provider_metadata(
             self.provider_data, name="Legacy payment metadata"
         )
         object.__setattr__(
-            self,
-            "provider_data",
-            _EMPTY
-            if not self.provider_data
-            else MappingProxyType(dict(self.provider_data)),
+            self, "provider_data", freeze_metadata(self.provider_data)
         )
 
     @classmethod

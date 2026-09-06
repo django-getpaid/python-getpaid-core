@@ -328,9 +328,7 @@ async def check_malformed_metadata_is_rejected_atomically(
 ) -> None:
     """A refused observation loses neither funds nor committed history."""
     repository = await factory(_prepared_facts())
-    await repository.apply_observation(
-        PAYMENT_ID, _capture("40.00", "e-1")
-    )
+    await repository.apply_observation(PAYMENT_ID, _capture("40.00", "e-1"))
 
     # Annotated as ``dict[str, Any]`` and violated on purpose: the check
     # exists because a plugin building metadata at runtime can produce a

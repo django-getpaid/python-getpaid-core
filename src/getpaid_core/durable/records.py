@@ -24,11 +24,19 @@ from getpaid_core.exceptions import InvalidTransitionError
 from getpaid_core.types import PaymentUpdate
 
 
-_EMPTY: Mapping[str, Any] = MappingProxyType({})
+#: The shared empty metadata mapping, so an absent mapping costs nothing
+#: and cannot be mutated.
+EMPTY_METADATA: Mapping[str, Any] = MappingProxyType({})
 
 
-def _freeze(mapping: Mapping[str, Any] | None) -> Mapping[str, Any]:
-    return _EMPTY if not mapping else MappingProxyType(dict(mapping))
+def freeze_metadata(mapping: Mapping[str, Any] | None) -> Mapping[str, Any]:
+    """Copy a metadata mapping behind a read-only view.
+
+    Records own their metadata: the caller's mapping is copied, so later
+    edits to it do not reach committed state, and the copy is proxied, so
+    nothing edits it through the record either.
+    """
+    return EMPTY_METADATA if not mapping else MappingProxyType(dict(mapping))
 
 
 #: Metadata keys the released 3.x contract used for core-owned replay
@@ -180,13 +188,13 @@ class PaymentFacts:
     fraud_status: str = FraudStatus.UNKNOWN
     fraud_message: str = ""
     reconciliation_required: bool = False
-    provider_data: Mapping[str, Any] = field(default=_EMPTY)
+    provider_data: Mapping[str, Any] = field(default=EMPTY_METADATA)
 
     def __post_init__(self) -> None:
-        validate_provider_metadata(
-            self.provider_data, name="Payment metadata"
+        validate_provider_metadata(self.provider_data, name="Payment metadata")
+        object.__setattr__(
+            self, "provider_data", freeze_metadata(self.provider_data)
         )
-        object.__setattr__(self, "provider_data", _freeze(self.provider_data))
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,13 +278,13 @@ class OperationIntent:
     operation_id: str
     operation_type: OperationType
     amount: Decimal | None = None
-    parameters: Mapping[str, Any] = field(default=_EMPTY)
+    parameters: Mapping[str, Any] = field(default=EMPTY_METADATA)
 
     def __post_init__(self) -> None:
         object.__setattr__(
             self, "operation_type", OperationType(self.operation_type)
         )
-        object.__setattr__(self, "parameters", _freeze(self.parameters))
+        object.__setattr__(self, "parameters", freeze_metadata(self.parameters))
 
     @property
     def parameters_digest(self) -> str:

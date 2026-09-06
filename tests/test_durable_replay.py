@@ -185,9 +185,7 @@ async def test_conflicting_reuse_is_detected_not_silently_suppressed():
     repository = await repository_with(prepared_facts())
     await repository.apply_observation("pay-1", capture("40.00", "e-1"))
 
-    plan = await repository.apply_observation(
-        "pay-1", capture("100.00", "e-1")
-    )
+    plan = await repository.apply_observation("pay-1", capture("100.00", "e-1"))
 
     assert plan.applied is False
     assert plan.facts.reconciliation_required is True
@@ -262,9 +260,7 @@ async def test_malformed_event_identity_is_rejected(identity):
     repository = await repository_with(prepared_facts())
 
     with pytest.raises(InvalidTransitionError):
-        await repository.apply_observation(
-            "pay-1", capture("100.00", identity)
-        )
+        await repository.apply_observation("pay-1", capture("100.00", identity))
 
     facts = await repository.get_payment_facts("pay-1")
     assert facts.captured_funds == Decimal("0")
