@@ -313,7 +313,12 @@ without that proof, core retains the normalized evidence and requires
 reconciliation rather than guessing a total. Ordinary cumulative observations
 apply independently supplied captured and refunded totals, even when one event
 label accompanies both. A stale money field does not suppress other valid
-information in the observation.
+information in the observation. Zero totals do not imply a refund, and implicit
+refund totals do not resolve externally observed pending refund work. A lower
+capture snapshot's historical hold cannot reinstate authorization. Shape validation
+runs before replay recognition; genuine trusted replays are acknowledged before
+comparing historical financial fields with today's bounds. Conflicting payment
+external IDs are compared with committed identity before envelope application.
 
 Equal/lower captures preserve money and pending, partial or full refund progress,
 including deliveries with different or missing event identities. Genuinely
@@ -340,7 +345,8 @@ records, defaulting to `()`. Each contains `event_identity` (possibly `None`),
 semantic fields, not raw `provider_data` or arbitrary plugin attributes. The
 record preserves the disputed claim, not merely a digest. Reasons include
 `financial_constraints`, `conflicting_identity`, `unresolved_delta`,
-`uncorrelated_outcome`, `conflicting_delta`, and `ambiguous_cancellation`. Equal records are retained
+`uncorrelated_outcome`, `conflicting_delta`, `conflicting_external_id`, and
+`ambiguous_cancellation`. Equal records are retained
 once; later writes must preserve distinct evidence.
 
 Finite but impossible financial claims are retained here with reconciliation

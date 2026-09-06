@@ -117,7 +117,7 @@ def _apply_to_facts(facts: PaymentFacts, update: PaymentUpdate) -> PaymentFacts:
         and update.paid_amount < facts.captured_funds
     ):
         # This snapshot's hold predates already-recorded capture. Validate its
-        # own bounds, but never reinstate authorization from that older snapshot.
+        # own bounds, but never reinstate that historical authorization.
         update = replace(
             update,
             locked_amount=None,
