@@ -314,11 +314,13 @@ def plan_observation(
     carrying different semantic content is refused and flagged for
     reconciliation rather than silently suppressing a financial change.
 
-    Raises ``InvalidTransitionError`` for evidence that cannot be applied
-    to the current state, and for malformed metadata or a malformed event
-    identity: an impossible transition stays an error rather than a
-    blanket ignored exception, and rejecting before anything is planned
-    is what leaves committed funds and committed history untouched.
+    ``operations`` is the complete retained history read in the same atomic
+    boundary. Correlated outcomes return affected records in the plan; an
+    uncorrelated aggregate never resolves an arbitrary active operation.
+    Financial-bound violations and ambiguous evidence are retained with a
+    reconciliation requirement, without forcing impossible money into facts.
+    Malformed fields and genuinely impossible lifecycle transitions raise
+    ``InvalidTransitionError`` before any plan can commit.
     """
     if update is None:
         return ObservationPlan(facts=facts, replay_record=None, applied=False)

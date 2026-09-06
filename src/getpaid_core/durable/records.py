@@ -97,7 +97,10 @@ def _canonical_amount(amount: Decimal | None) -> str:
     """Render an amount so ``100`` and ``100.00`` compare as one value."""
     if amount is None:
         return ""
-    return format(amount.normalize(), "f")
+    rendered = format(amount, "f")
+    if "." in rendered:
+        rendered = rendered.rstrip("0").rstrip(".")
+    return "0" if amount == 0 else rendered
 
 
 def _canonical_parameter(value: Any) -> Any:
@@ -230,6 +233,10 @@ class PaymentFacts:
     not a financial fact; it is the context a provider event identity is
     unique within, and it is read from stored facts rather than from a
     caller's object.
+
+    ``observation_conflicts`` retains compact normalized disputed claims.
+    Preserve it on every write and through serialization, independently of
+    provider metadata. It is evidence for investigation, not applied money.
 
     ``provider_data`` is unrestricted plugin metadata. It holds no
     core-owned bookkeeping: replay evidence is a separate
@@ -496,6 +503,12 @@ class PaymentObservation(PaymentUpdate):
     uniquely match a retained provider handle. Equal amounts and the active
     operation are never correlation. Aggregate amounts remain cumulative;
     ``outcome.settled_amount`` describes only the identified operation.
+    Set ``delta_only`` when supplied money is an isolated increment; it never
+    accumulates directly. A matching outcome and retained reservation must
+    establish the total, or the evidence requires reconciliation.
+    ``cancellation_scope=RELEASE_LOCK`` explicitly confirms release of this
+    payment's remaining authorization. Refund cancellation instead requires a
+    correlated outcome tied to a reserved cancellation or refund intent.
     """
 
     operation_id: str | None = None
@@ -508,12 +521,15 @@ class PaymentObservation(PaymentUpdate):
 class ObservationPlan:
     """What an adapter must commit for one provider observation.
 
-    ``facts`` and ``replay_record`` commit together or not at all. When
+    ``facts``, ``replay_record`` and every record in ``operations`` commit
+    together or not at all. The planner needs the complete retained operation
+    history, not just active intents. When
     ``applied`` is false the observation added no new financial evidence,
     but ``facts`` may still differ from what was read -- a reused event
-    identity carrying different content sets
+    identity carrying different content retains a dispute and sets
     ``facts.reconciliation_required`` -- so the adapter commits ``facts``
-    either way.
+    either way. Financial-bound violations likewise retain disputed evidence
+    without recording impossible money or an applied-event replay record.
     """
 
     facts: PaymentFacts

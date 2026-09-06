@@ -1,6 +1,7 @@
 """Cross-channel cumulative evidence, against current durable facts."""
 
 from decimal import Decimal
+from decimal import localcontext
 
 import pytest
 
@@ -10,6 +11,7 @@ from getpaid_core.durable import OperationOutcome
 from getpaid_core.durable import OperationState
 from getpaid_core.durable import OperationType
 from getpaid_core.durable import PaymentFacts
+from getpaid_core.durable import observation_digest
 from getpaid_core.durable.records import PaymentObservation
 from getpaid_core.enums import PaymentEvent
 from getpaid_core.enums import PaymentStatus
@@ -569,3 +571,19 @@ async def test_correlated_refund_cancellation_race_preserves_returned_funds(
     assert (
         await repository.get_operation("payment", "cancel")
     ).state == OperationState.SUCCEEDED
+
+
+def test_replay_identity_preserves_precise_amounts_under_decimal_context():
+    with localcontext() as context:
+        context.prec = 6
+        first = observation_digest(
+            PaymentUpdate(paid_amount=Decimal("0.1234567891"))
+        )
+        changed = observation_digest(
+            PaymentUpdate(paid_amount=Decimal("0.1234567892"))
+        )
+        equal = observation_digest(
+            PaymentUpdate(paid_amount=Decimal("0.12345678910"))
+        )
+    assert first != changed
+    assert first == equal
