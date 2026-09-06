@@ -177,7 +177,9 @@ def _resolve_amount(
 
     if operation_type in {OperationType.PREPARE, OperationType.CANCEL_REFUND}:
         if intent.amount is not None:
-            raise InvalidTransitionError("This operation does not accept an amount.")
+            raise InvalidTransitionError(
+                "This operation does not accept an amount."
+            )
         if operation_type is OperationType.PREPARE and (
             facts.status != PaymentStatus.NEW
             or facts.captured_funds != 0
@@ -575,7 +577,8 @@ def plan_outcome(
             candidate.operation_type is OperationType.CANCEL_REFUND
             and candidate.state is OperationState.SUCCEEDED
             and candidate.payment_id == operation.payment_id
-            and candidate.parameters.get(CANCELLATION_TARGET) == operation.operation_id
+            and candidate.parameters.get(CANCELLATION_TARGET)
+            == operation.operation_id
             for candidate in operations
         )
     )

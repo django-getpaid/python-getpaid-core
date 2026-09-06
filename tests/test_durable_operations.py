@@ -144,9 +144,16 @@ def test_refund_cancellation_may_target_an_outstanding_refund():
         ),
     ).operation
 
-    plan = plan_reservation(
+    pending = plan_outcome(
         paid,
-        (refund,),
+        refund,
+        OperationOutcome(
+            OperationState.PROVIDER_PENDING, correlation="refund-id"
+        ),
+    )
+    plan = plan_reservation(
+        pending.facts,
+        (pending.operation,),
         OperationIntent(
             operation_id="cancel-1",
             operation_type=OperationType.CANCEL_REFUND,
@@ -258,12 +265,15 @@ def test_a_settled_operation_cannot_be_resettled():
         facts, reserved, OperationOutcome(state=OperationState.SUCCEEDED)
     )
 
-    with pytest.raises(InvalidTransitionError, match="succeeded"):
-        plan_outcome(
-            settled.facts,
-            settled.operation,
-            OperationOutcome(state=OperationState.REJECTED),
-        )
+    conflicting = plan_outcome(
+        settled.facts,
+        settled.operation,
+        OperationOutcome(state=OperationState.REJECTED),
+    )
+    assert conflicting.operation.state is OperationState.SUCCEEDED
+    assert conflicting.operation.reconciliation_required is True
+    assert conflicting.facts.reconciliation_required is True
+    assert conflicting.facts.captured_funds == Decimal("100.00")
 
 
 def test_repeating_a_terminal_outcome_is_idempotent():

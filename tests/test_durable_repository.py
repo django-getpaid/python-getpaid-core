@@ -2,6 +2,7 @@
 
 import inspect
 from collections.abc import Sequence
+from datetime import datetime
 
 import pytest
 
@@ -13,6 +14,7 @@ from getpaid_core.durable import OperationOutcome
 from getpaid_core.durable import OperationRecord
 from getpaid_core.durable import OutcomePlan
 from getpaid_core.durable import PaymentFacts
+from getpaid_core.durable import SubmissionPlan
 from getpaid_core.durable import commit_semantic_transition
 from getpaid_core.durable import missing_durable_operations
 from getpaid_core.durable import require_durable_state
@@ -32,6 +34,18 @@ class ConformingRepository:
     async def reserve_operation(
         self, payment_id: str, intent: OperationIntent
     ) -> OperationRecord:
+        raise NotImplementedError
+
+    async def claim_submission(
+        self,
+        payment_id: str,
+        operation_id: str,
+        *,
+        expected_attempt: int,
+        now: datetime,
+        retry_until: datetime | None = None,
+        idempotency_scope: str | None = None,
+    ) -> SubmissionPlan:
         raise NotImplementedError
 
     async def apply_observation(
