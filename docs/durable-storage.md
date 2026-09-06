@@ -25,6 +25,8 @@ these, listed in `getpaid_core.durable.MANDATORY_OPERATIONS`:
 | `claim_submission(payment_id, operation_id, *, expected_attempt, now, retry_until=None, idempotency_scope=None)` | Atomically grant one submission attempt and persist `SUBMITTING` before provider I/O; compare the attempt counter, preserve the original retry window |
 | `apply_observation(payment_id, update)` | Apply a normalized observation to current state and return the committed plan |
 | `record_operation_outcome(payment_id, operation_id, outcome)` | Commit an operation's outcome together with the financial facts it settles |
+| `record_operation_failure(payment_id, operation_id, evidence)` | Apply `plan_operation_failure` atomically to the current operation; retain safe claims and flag reconciliation without moving money |
+| `resolve_operation(payment_id, operation_id, resolution, *, expected_operation, expected_facts)` | Apply `plan_resolution` against reviewed/current snapshots and complete history; commit audit, facts and affected operations atomically |
 | `get_operation(payment_id, operation_id)` | Return one committed operation record |
 | `list_unresolved_operations()` | Return the operations still holding a payment or awaiting reconciliation |
 | `list_payments_requiring_reconciliation()` | Return the payments flagged for reconciliation, including those with no operation behind them |
@@ -212,8 +214,11 @@ Processors declare `operation_capabilities`, a mapping from `OperationType` to
   normalize absence to `REJECTED`.
 
 Implement the classmethods `submit_operation(operation, *, config)` and, when
-lookup is declared, `lookup_operation(operation, *, config)`. Each returns
-`OperationOutcome`. No caller-owned payment instance reaches these methods.
+lookup is declared, `lookup_operation(operation, *, config)`. Submission returns
+`OperationOutcome`; lookup returns that or `OperationNotFound()`. Core interprets
+absence as `UNKNOWN` unless `AUTHORITATIVE_INCLUDING_ABSENCE` conclusively excludes
+both past and later execution. An explicit provider refusal remains a `REJECTED`
+outcome, distinct from absence. No caller-owned payment instance reaches these methods.
 Construct the wire request only from the frozen `parameters`, `resolved_amount`
 and `idempotency_key`; operational fields such as attempt counter and current
 state are **not** request parameters. Currency, buyer/return information and
@@ -260,18 +265,115 @@ If neither safe retry nor lookup is available, construction of the flow must
 explicitly opt that operation into `restricted_operations=frozenset({...})`.
 It may then submit **once**, retaining uncertainty after response loss. A
 process crash before transmission can leave it stuck; time cannot distinguish
-that from successful execution followed by lost acknowledgement. Operator
-resolution and authorization remain integration responsibilities.
+that from successful execution followed by lost acknowledgement. Applications
+invoke the operator-resolution mechanics below and enforce authorization.
 
 Pre-submission validation/conflict and storage failures remain exceptions.
 After I/O, `OperationEvidenceError` identifies invalid/inapplicable normalized
 evidence; `OperationPersistenceError` identifies a failed local outcome write.
-Both expose only operation/payment identity, type and safe known correlation
-and explicitly forbid blind provider resubmission. A failed final write leaves
-the earlier durable submission record discoverable even if no further write
-can succeed. Cancellation propagates and also leaves that anchor; this slice
-creates no detached cleanup tasks. Richer post-response recovery and bounded
-cancellation cleanup remain separate implementation work.
+Both expose operation/payment identity, type, safe known correlation and a
+`RecoveryEvidence` value in `context["evidence"]`, and explicitly forbid blind
+provider resubmission. The original local failure is `__cause__`, not relabelled
+provider rejection. Core attempts `record_operation_failure` once, bounded by
+`recovery_timeout` (default 5 seconds, positive and finite). The boolean
+`context["recovery_recorded"]` reports whether that attempt was acknowledged.
+If it fails or times out, the original error still wins and the pre-submission
+record remains the recovery anchor. Failed acknowledgement does not prove that
+either local write rolled back.
+
+The retention write preserves the current operation state, including a callback
+or commit that already established settlement. It appends unique safe claims to
+`OperationRecord.recovery_evidence`, flags that operation for reconciliation, and
+never moves money. The flag blocks new reservations even on a terminal operation;
+duplicates still retrieve existing state. Discovery uses `get_operation` and
+`list_unresolved_operations`, including terminal flagged records. Queries may
+inspect flagged terminal records too, but cannot authorize their resubmission.
+A later query/callback can record financial evidence; the conservative flag
+remains until an audited decision clears it.
+
+This asyncio-specific retention attempt is awaited inline, without shielding or
+background tasks. Cancellation still propagates; cancellation-aware bounded
+cleanup belongs to the subsequent cancellation slice, not this guarantee.
+
+### Safe evidence and legacy error migration
+
+`RecoveryEvidence` contains only `state`, finite `settled_amount`, `correlation`
+and `external_id`, each optional. It records a **claim**, not committed settlement;
+an absent/unsafe field is `None`, never evidence of rejection. Omitted settlement
+amounts retain their meaning against the durable reservation. No provider payload,
+plugin subclass attributes, request parameters or arbitrary result repr is copied.
+
+Outcome correlation/payment handles must match `[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}`.
+Core rejects URLs, whitespace/control text, containers and oversized handles before
+outcome/observation persistence, and omits them from recovery errors. Plugins must
+still select non-secret identifiers: syntax cannot distinguish an opaque credential
+from an opaque identifier. Providers with other handle syntax need a stable,
+integration-owned safe mapping, not lossy truncation or punctuation replacement.
+`OperationResult.evidence` exposes allowlisted committed fields; its repr excludes
+both the operation's frozen request and the snapshot's unrestricted metadata.
+The snapshot/operation remain application data, **not logging payloads**.
+
+For the next-major cutover, replace charge-specific
+`ReconciliationRequiredError.charge_result` / `context["provider_result"]` handling
+with `OperationEvidenceError` and `OperationPersistenceError` for **all five**
+mutations. Use their identity, safe evidence and durable discovery, not raw result
+serialization. Preserve existing legacy evidence in controlled storage; this API
+does not erase or retroactively certify it. Released `PaymentFlow` and its invalid
+monetary-result protections are unchanged, and do not acquire durable guarantees.
+Do not log raw exception chains: `__cause__` deliberately preserves the original
+adapter error and may contain sensitive text. Route detailed diagnostics through
+an access-controlled channel; core does not log them.
+
+### Audited operator resolution
+
+Applications authorize the operator, gather provider evidence and load current
+`get_operation` / `get_payment_facts` values for review. Invoke:
+
+```python
+from getpaid_core.durable import OperatorResolution, OperationOutcome, OperationState
+
+resolution = OperatorResolution(
+    resolution_id="case-42-decision-1", actor="operator-7",
+    reason="Capture confirmed in provider ledger",
+    evidence_references=("ledger-case-42",), resolved_at=now,
+    outcome=OperationOutcome(OperationState.SUCCEEDED, correlation="capture-42"),
+)
+result = await flow.resolve_operation(
+    payment_id, operation_id, resolution,
+    expected_operation=reviewed_operation, expected_facts=reviewed_facts,
+)
+```
+
+`resolution_id`, actor, reason and each evidence reference are nonempty printable
+strings (at most 2000 characters). References are controlled pointers, not embedded
+provider payloads. `resolved_at` is timezone-aware audit time, **not** proof that
+execution did or did not occur. Decisions require `SUCCEEDED` or `REJECTED`, never
+pending/unknown or a reconciliation-required outcome. Core supplies mechanics,
+not authorization, evidence verification, an operator UI, a queue or a scheduler.
+
+The repository compares reviewed facts/operation inside its atomic boundary.
+A changed snapshot raises `StateConflictError`; review again rather than blindly
+retrying a stale decision. Same resolution ID and contents is an acknowledgement
+retry and neither duplicates audit nor moves money again; changed contents conflict.
+An exact retry returns current state, which may include newer callback evidence.
+Audit lives in `OperationRecord.resolutions` and commits with the financial effects
+and related cancellation target. Audit failure commits no settlement. No provider
+command is sent. Local storage errors propagate; retry the same decision identity.
+
+The planner reuses financial rules and complete history. It cannot undo confirmed
+capture/refund, force impossible amounts into balances or silently replace known
+correlation. Prior disputed outcomes, observation conflicts and recovery claims
+remain retained. New contradictory callbacks flag reconciliation again; the audit
+never suppresses provider evidence. Release/cancellation cannot invent returned
+funds or erase racing refund settlement.
+
+Resolving an operation clears only its own reconciliation flag. To acknowledge the
+reviewed payment-wide requirement too, explicitly set
+`clear_payment_reconciliation=True`; another operation's unresolved dispute blocks
+that acknowledgement. Financial facts remain subject to their invariants. Payments
+with no durable operation (including ambiguous legacy migrations) still need the
+integration's audited migration/repair path; do not invent an operation identity
+or a financial command to use this API.
 
 ### Refund cancellation
 
@@ -411,6 +513,17 @@ event scope and history. A digest alone cannot reconstruct that evidence. If it
 is unavailable, mutation-block affected payments and reconcile before resuming;
 never blindly discard old trusted history or treat old events as unseen. Do not
 mix old/new digest writers, or roll back to writers that erase new evidence fields.
+
+Adapters must additionally round-trip `OperationRecord.recovery_evidence` and
+`OperationRecord.resolutions` (both default `()`), including every safe evidence
+field, audit ID/actor/reason/reference/time, normalized decision outcome and explicit
+payment acknowledgement. Preserve them on **every** writer path. Upgrade storage
+and readers before enabling the two new mandatory semantic methods; old writers
+must not erase audit/evidence. Previously absent tuples may default empty only
+when no history existed, never to discard known evidence. Validate existing stored
+handles against the safe mapping contract before enabling these writers; quarantine
+unsafe evidence in controlled storage for reconciliation instead of silently dropping
+it. The conformance suite checks concurrent retention and idempotent audited settlement.
 
 Adapters must round-trip `PaymentFacts.observation_conflicts` and every field of
 its records, retain `OperationRecord.conflicting_outcomes`, load complete retained
@@ -599,10 +712,10 @@ These are deliberately absent here and tracked separately:
   the frozen operation instead. `PaymentObservation` supplies cross-channel
   correlation mechanics, but each plugin must normalize authenticated evidence;
   never infer correlation merely from the currently active operation.
-- **Complete recovery policy** — richer post-response recovery evidence,
-  cancellation-aware bounded cleanup and auditable operator-resolution APIs
-  remain follow-on work. No recovery scheduler, database adapter or operator
-  authorization system is implemented here.
+- **Cancellation recovery** — cancellation-aware bounded cleanup remains
+  follow-on work. Ordinary post-response recovery and audited operation-resolution
+  mechanics are implemented here, not a scheduler, database adapter or operator
+  authorization system.
 - **Real adapter/provider assurance and the complete ADR** — these landed
   reconciliation mechanics do not establish database isolation, authenticate a
   real provider's evidence, or claim the entire accepted ADR has shipped.

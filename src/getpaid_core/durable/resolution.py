@@ -4,7 +4,10 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from dataclasses import replace
 from datetime import datetime
+from typing import TYPE_CHECKING
+from typing import cast
 
+from getpaid_core._amounts import validate_payment_amounts
 from getpaid_core.durable.evidence import normalize_outcome
 from getpaid_core.durable.records import TERMINAL_OPERATION_STATES
 from getpaid_core.durable.records import OperationOutcome
@@ -12,10 +15,15 @@ from getpaid_core.durable.records import OperationRecord
 from getpaid_core.durable.records import OperationState
 from getpaid_core.durable.records import OutcomePlan
 from getpaid_core.durable.records import PaymentFacts
+from getpaid_core.durable.rules import _FactsPayment
 from getpaid_core.durable.rules import plan_outcome
 from getpaid_core.exceptions import InvalidTransitionError
 from getpaid_core.exceptions import OperationConflictError
 from getpaid_core.exceptions import StateConflictError
+
+
+if TYPE_CHECKING:
+    from getpaid_core.protocols import Payment
 
 
 def _audit_text(value: object) -> bool:
@@ -124,6 +132,7 @@ def plan_resolution(
         raise OperationConflictError(
             "Resolution payment identity does not match."
         )
+    validate_payment_amounts(cast("Payment", _FactsPayment(facts)))
     outcome = resolution.outcome
     if operation.state is OperationState.SUCCEEDED and (
         outcome.state is not OperationState.SUCCEEDED

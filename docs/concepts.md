@@ -21,6 +21,29 @@ permission to submit it again, even after a crash or lease expiry.
 These guarantees belong to the explicit durable flow, **not** the released
 `PaymentFlow` API described in the legacy request/result sections below.
 
+## Durable Recovery
+
+Local recording failure is not provider rejection or remote rollback. All five
+mutating operations share the same safe recovery boundary. Errors carry normalized
+provider evidence, payment/operation identity and the original local cause. A
+bounded local retention attempt preserves evidence without inventing settlement;
+if storage is unavailable, the earlier durable submission still makes the intent
+discoverable after restart. Never use an error as permission to replay the command.
+
+Applications query operations explicitly through `reconcile_operation` and discover
+work through repository lookup/list methods; core runs no scheduler. A provider's
+`OperationNotFound` remains unknown unless its declared contract excludes execution
+conclusively. Pending/unknown are ordinary structured outcomes, not failed payments.
+
+For cases queries cannot settle, `resolve_operation` accepts an `OperatorResolution`
+with actor, reason, evidence references and decision time. The integration authorizes
+the operator; core atomically compares reviewed snapshots, applies financial rules
+and commits audit with settlement. Stale decisions fail, old evidence survives, and
+a new contradictory callback can reopen reconciliation. Time alone never resolves
+uncertainty. See the [recovery contract](durable-storage.md#audited-operator-resolution)
+for storage upgrade and error migration details. Cancellation-aware cleanup remains
+separate work; these guarantees do not extend the released `PaymentFlow`.
+
 ## Durable Observations and Reconciliation
 
 A cumulative observation reports what has happened, not a new command.
@@ -292,6 +315,13 @@ class DurablePaymentRepository(Protocol):
     async def apply_observation(self, payment_id: str, update: PaymentUpdate | None) -> ObservationPlan: ...
     async def record_operation_outcome(
         self, payment_id: str, operation_id: str, outcome: OperationOutcome
+    ) -> OutcomePlan: ...
+    async def record_operation_failure(
+        self, payment_id: str, operation_id: str, evidence: RecoveryEvidence
+    ) -> OperationRecord: ...
+    async def resolve_operation(
+        self, payment_id: str, operation_id: str, resolution: OperatorResolution,
+        *, expected_operation: OperationRecord, expected_facts: PaymentFacts,
     ) -> OutcomePlan: ...
     async def get_operation(self, payment_id: str, operation_id: str) -> OperationRecord | None: ...
     async def list_unresolved_operations(self) -> Sequence[OperationRecord]: ...

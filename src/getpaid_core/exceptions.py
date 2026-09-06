@@ -92,9 +92,11 @@ class OperationEvidenceError(InvalidTransitionError):
 class OperationPersistenceError(GetPaidException):
     """Local durability failed after provider I/O; reconcile the stored intent.
 
-    Context contains only payment/operation identity, operation type and safe
-    known correlation. The pre-submission record remains the recovery anchor.
-    This exception never authorizes provider resubmission.
+    Context carries payment/operation identity, type, safe correlation,
+    allowlisted ``evidence`` and whether local recovery retention was
+    acknowledged (``recovery_recorded``). The original failure is ``__cause__``;
+    do not log that chain indiscriminately. The pre-submission intent remains
+    discoverable even when retention fails. No provider resubmission is allowed.
     """
 
     provider_resubmission_allowed = False

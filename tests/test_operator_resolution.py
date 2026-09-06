@@ -1,5 +1,6 @@
 """Audited decisions cannot bypass atomicity or financial invariants."""
 
+from dataclasses import replace
 from decimal import Decimal
 
 import pytest
@@ -172,6 +173,41 @@ async def test_resolution_cannot_erase_confirmed_effects_or_reuse_audit_identity
             expected_operation=resolved.operation,
         )
     assert await repository.get_operation("pay", "intent") == resolved.operation
+
+
+def test_operator_acknowledgement_cannot_clear_corrupt_financial_facts():
+    from getpaid_core.durable import OperationIntent
+    from getpaid_core.durable import PaymentFacts
+    from getpaid_core.durable import plan_outcome
+    from getpaid_core.durable import plan_reservation
+    from getpaid_core.durable import plan_resolution
+
+    facts = PaymentFacts(
+        "pay",
+        Decimal("100"),
+        remaining_authorization=Decimal("100"),
+        status="pre-auth",
+    )
+    operation = plan_reservation(
+        facts, (), OperationIntent("capture", OperationType.CHARGE)
+    ).operation
+    completed = plan_outcome(
+        facts, operation, OperationOutcome(OperationState.SUCCEEDED)
+    )
+    corrupt = replace(
+        completed.facts,
+        refunded_funds=Decimal("101"),
+        reconciliation_required=True,
+    )
+    with pytest.raises(InvalidTransitionError):
+        plan_resolution(
+            corrupt,
+            completed.operation,
+            decision(clear_payment_reconciliation=True),
+            expected_facts=corrupt,
+            expected_operation=completed.operation,
+            operations=(completed.operation,),
+        )
 
 
 async def test_failed_audit_commit_leaves_uncertainty_and_no_money():
