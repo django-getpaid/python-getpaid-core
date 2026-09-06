@@ -12,7 +12,14 @@ class TestPaymentStatus:
     def test_values(self) -> None:
         assert PaymentStatus.NEW == "new"
         assert PaymentStatus.PAID == "paid"
+        assert PaymentStatus.PARTIAL == "partially_paid"
+        assert PaymentStatus.PARTIALLY_REFUNDED == "partially_refunded"
+        assert PaymentStatus.REFUNDED == "refunded"
         assert PaymentStatus.CANCELLED == "cancelled"
+
+    def test_partial_payment_and_partial_refund_are_distinct(self) -> None:
+        """A partly paid payment is not a partly refunded one."""
+        assert PaymentStatus.PARTIAL != PaymentStatus.PARTIALLY_REFUNDED
 
 
 class TestFraudStatus:

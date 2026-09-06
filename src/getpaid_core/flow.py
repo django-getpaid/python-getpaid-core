@@ -12,7 +12,11 @@ from getpaid_core.enums import PaymentStatus
 from getpaid_core.exceptions import InvalidTransitionError
 from getpaid_core.exceptions import ReconciliationRequiredError
 from getpaid_core.fsm import apply_payment_update
+from getpaid_core.fsm import capturable_amount
 from getpaid_core.fsm import coerce_payment_status
+from getpaid_core.fsm import has_unresolved_refund
+from getpaid_core.fsm import refundable_amount
+from getpaid_core.fsm import require_capture_eligible
 from getpaid_core.protocols import Order
 from getpaid_core.protocols import Payment
 from getpaid_core.protocols import PaymentRepository
@@ -233,7 +237,14 @@ class PaymentFlow(BaseFlow):
         amount: Decimal | None = None,
         **kwargs: Any,
     ) -> ChargeResult:
-        """Charge a pre-authorized payment.
+        """Capture funds from a payment's remaining authorization.
+
+        Eligibility is the payment's current facts, not the status it
+        happens to hold: a partial capture leaves the remaining
+        authorization usable, so capture may be repeated until that
+        authorization or the required amount is exhausted. Returned funds
+        close it -- refunding does not reopen capture capacity, and
+        collecting replacement funds needs a new payment.
 
         Raises ``ReconciliationRequiredError`` when the gateway charge
         succeeded but recording it locally failed -- in that case money
@@ -246,20 +257,22 @@ class PaymentFlow(BaseFlow):
             payment=payment,
             kwargs={"amount": amount, **kwargs},
         )
-        # Validate precondition before calling processor (avoids
+        # Validate preconditions before calling the processor (avoids
         # unnecessary API calls when the payment is not chargeable).
-        if payment.status not in {
-            PaymentStatus.PRE_AUTH,
-            PaymentStatus.IN_CHARGE,
-        }:
-            raise InvalidTransitionError(
-                f"Cannot charge payment in {payment.status!r} status. "
-                "Payment must be PRE_AUTH or IN_CHARGE."
-            )
+        # Eligibility follows the payment's current facts, so a partial
+        # capture leaves its remaining authorization usable.
         validate_payment_amounts(payment)
-        available = min(
-            payment.amount_locked, payment.amount_required - payment.amount_paid
-        )
+        require_capture_eligible(payment)
+        available = capturable_amount(payment)
+        if available <= 0:
+            reason = (
+                "no remaining authorization is held"
+                if payment.amount_locked <= 0
+                else "the required amount is already captured"
+            )
+            raise InvalidTransitionError(
+                f"Cannot charge payment {payment.id!r}: {reason}."
+            )
         amount = context["kwargs"].get("amount")
         if amount is None:
             amount = available
@@ -334,18 +347,26 @@ class PaymentFlow(BaseFlow):
         payment: Payment,
         **kwargs: Any,
     ) -> Decimal:
-        """Release a pre-authorized lock."""
+        """Release the payment's remaining authorization.
+
+        A release needs a positive remaining authorization, not a
+        particular status: the authorization left over after a partial
+        capture is still releasable. It removes that authorization whole
+        and changes neither captured nor refunded funds, so a payment
+        with captured funds stays reported as paid or partially paid
+        rather than refunded.
+        """
         context = self._run_operation_validators(
             operation="release_lock",
             payment=payment,
             kwargs=dict(kwargs),
         )
-        if payment.status != PaymentStatus.PRE_AUTH:
-            raise InvalidTransitionError(
-                f"Cannot release lock for payment in {payment.status!r} "
-                "status. Payment must be PRE_AUTH."
-            )
         validate_payment_amounts(payment)
+        if payment.amount_locked <= 0:
+            raise InvalidTransitionError(
+                f"Cannot release the authorization of payment "
+                f"{payment.id!r}: none is held."
+            )
         validate_amount(
             payment.amount_locked, "amount_locked", allow_zero=False
         )
@@ -368,23 +389,23 @@ class PaymentFlow(BaseFlow):
         amount: Decimal | None = None,
         **kwargs: Any,
     ) -> RefundResult:
-        """Start a refund."""
+        """Start a refund of captured funds.
+
+        Eligibility is the captured funds not yet returned, so a
+        partially refunded payment stays refundable down to zero.
+        """
         context = self._run_operation_validators(
             operation="start_refund",
             payment=payment,
             kwargs={"amount": amount, **kwargs},
         )
-        if payment.status not in {
-            PaymentStatus.PAID,
-            PaymentStatus.PARTIAL,
-            PaymentStatus.REFUND_STARTED,
-        }:
-            raise InvalidTransitionError(
-                f"Cannot start refund for payment in {payment.status!r} "
-                "status. Payment must be PAID, PARTIAL, or REFUND_STARTED."
-            )
         validate_payment_amounts(payment)
-        available = payment.amount_paid - payment.amount_refunded
+        available = refundable_amount(payment)
+        if available <= 0:
+            raise InvalidTransitionError(
+                f"Cannot start refund for payment {payment.id!r}: no "
+                "captured funds are left to return."
+            )
         amount = context["kwargs"].get("amount")
         if amount is None:
             amount = available
@@ -429,14 +450,14 @@ class PaymentFlow(BaseFlow):
             kwargs=dict(kwargs),
         )
         status = coerce_payment_status(payment)
-        if status not in {
-            PaymentStatus.REFUND_STARTED,
-            PaymentStatus.PAID,
-            PaymentStatus.PARTIAL,
-        }:
+        outstanding = (
+            has_unresolved_refund(payment) or refundable_amount(payment) > 0
+        )
+        if not outstanding:
             raise InvalidTransitionError(
                 f"Cannot cancel refund for payment in {status.value!r} "
-                "status. Payment must be REFUND_STARTED, PAID, or PARTIAL."
+                "status: no refund is outstanding and no captured funds "
+                "remain to return."
             )
         processor = self.get_processor(payment)
         success = await processor.cancel_refund(**context["kwargs"])

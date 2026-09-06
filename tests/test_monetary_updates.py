@@ -107,9 +107,9 @@ def test_unused_financial_field_is_still_validated(field):
         (
             "refund_confirmed",
             "refunded_amount",
-            "partially_paid",
+            "partially_refunded",
             {"amount_paid": Decimal("100"), "amount_refunded": Decimal("60")},
-            "partially_paid",
+            "partially_refunded",
         ),
     ],
 )
