@@ -57,7 +57,15 @@ class InMemoryDurableRepository:
                 self._facts[payment_id],
                 self._replay.setdefault(payment_id, []),
                 update,
+                operations=self._operations.get(payment_id, ()),
             )
+            replacements = {
+                record.operation_id: record for record in plan.operations
+            }
+            self._operations[payment_id] = [
+                replacements.get(record.operation_id, record)
+                for record in self._operations.get(payment_id, ())
+            ]
             self._facts[payment_id] = plan.facts
             if plan.replay_record is not None:
                 self._replay[payment_id].append(plan.replay_record)

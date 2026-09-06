@@ -322,6 +322,16 @@ def observation_digest(update: PaymentUpdate) -> str:
         update.external_id or "",
         update.fraud_message or "",
     )
+    if isinstance(update, PaymentObservation):
+        outcome = update.outcome
+        parts += (
+            update.operation_id or "",
+            str(outcome.state) if outcome else "",
+            _canonical_amount(outcome.settled_amount) if outcome else "",
+            (outcome.correlation or "") if outcome else "",
+            str(outcome.reconciliation_required) if outcome else "",
+            (outcome.external_id or "") if outcome else "",
+        )
     return sha256("\x1f".join(parts).encode()).hexdigest()
 
 
@@ -455,6 +465,21 @@ class OperationOutcome:
             ) from exc
 
 
+@dataclass(slots=True)
+class PaymentObservation(PaymentUpdate):
+    """Authenticated cross-channel evidence, optionally tied to an intent.
+
+    A processor supplies ``operation_id`` only from a verified provider echo
+    of the merchant identity. Alternatively ``outcome.correlation`` must
+    uniquely match a retained provider handle. Equal amounts and the active
+    operation are never correlation. Aggregate amounts remain cumulative;
+    ``outcome.settled_amount`` describes only the identified operation.
+    """
+
+    operation_id: str | None = None
+    outcome: OperationOutcome | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class ObservationPlan:
     """What an adapter must commit for one provider observation.
@@ -470,6 +495,7 @@ class ObservationPlan:
     facts: PaymentFacts
     replay_record: ReplayRecord | None
     applied: bool
+    operations: tuple[OperationRecord, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

@@ -28,6 +28,7 @@ from getpaid_core.durable.records import OperationState
 from getpaid_core.durable.records import OperationType
 from getpaid_core.durable.records import OutcomePlan
 from getpaid_core.durable.records import PaymentFacts
+from getpaid_core.durable.records import PaymentObservation
 from getpaid_core.durable.records import ReplayRecord
 from getpaid_core.durable.records import ReservationPlan
 from getpaid_core.durable.records import SubmissionPlan
@@ -121,6 +122,8 @@ def plan_observation(
     facts: PaymentFacts,
     replay_log: Iterable[ReplayRecord],
     update: PaymentUpdate | None,
+    *,
+    operations: Iterable[OperationRecord] = (),
 ) -> ObservationPlan:
     """Plan the atomic application of one provider observation.
 
@@ -161,10 +164,39 @@ def plan_observation(
                 applied=False,
             )
 
+    operations = tuple(operations)
+    changed: tuple[OperationRecord, ...] = ()
+    result = _apply_to_facts(facts, update)
+    if isinstance(update, PaymentObservation) and update.outcome is not None:
+        candidates = [
+            operation
+            for operation in operations
+            if operation.payment_id == facts.payment_id
+            and operation.backend == facts.backend
+            and (
+                operation.operation_id == update.operation_id
+                if update.operation_id is not None
+                else update.outcome.correlation is not None
+                and operation.correlation == update.outcome.correlation
+            )
+        ]
+        if len(candidates) != 1:
+            result = replace(result, reconciliation_required=True)
+        else:
+            outcome_plan = plan_outcome(
+                result, candidates[0], update.outcome, operations=operations
+            )
+            result = outcome_plan.facts
+            changed = (outcome_plan.operation, *outcome_plan.related_operations)
+    replacements = {operation.operation_id: operation for operation in changed}
+    if any(
+        replacements.get(operation.operation_id, operation).is_active
+        and operation.operation_type is OperationType.START_REFUND
+        for operation in operations
+    ):
+        result = replace(result, status=PaymentStatus.REFUND_STARTED)
     return ObservationPlan(
-        facts=_apply_to_facts(facts, update),
-        replay_record=record,
-        applied=True,
+        facts=result, replay_record=record, applied=True, operations=changed
     )
 
 

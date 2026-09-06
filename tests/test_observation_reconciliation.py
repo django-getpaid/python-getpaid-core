@@ -6,6 +6,9 @@ import pytest
 
 from getpaid_core.durable import InMemoryDurableRepository
 from getpaid_core.durable import OperationIntent
+from getpaid_core.durable import OperationOutcome
+from getpaid_core.durable import OperationState
+from getpaid_core.durable.records import PaymentObservation
 from getpaid_core.durable import OperationType
 from getpaid_core.durable import PaymentFacts
 from getpaid_core.enums import PaymentEvent
@@ -77,3 +80,62 @@ async def test_capture_snapshots_preserve_refund_progress(
     )
     assert replay.facts == plan.facts
     assert replay.applied is (identity is None)
+
+
+async def test_correlated_callback_completes_before_late_acceptance():
+    repository = InMemoryDurableRepository(
+        [
+            PaymentFacts(
+                "payment",
+                D("100"),
+                backend="test",
+                remaining_authorization=D("100"),
+                status=PaymentStatus.PRE_AUTH,
+            )
+        ]
+    )
+    await repository.reserve_operation(
+        "payment", OperationIntent("charge", OperationType.CHARGE, D("40"))
+    )
+    plan = await repository.apply_observation(
+        "payment",
+        PaymentObservation(
+            payment_event=PaymentEvent.PAYMENT_CAPTURED,
+            paid_amount=D("40"),
+            operation_id="charge",
+            outcome=OperationOutcome(
+                OperationState.SUCCEEDED,
+                settled_amount=D("40"),
+                correlation="provider-charge",
+            ),
+            provider_event_id="callback",
+        ),
+    )
+    assert plan.operations[0].state == OperationState.SUCCEEDED
+    assert (
+        await repository.get_operation("payment", "charge")
+    ).state == OperationState.SUCCEEDED
+    late = await repository.record_operation_outcome(
+        "payment",
+        "charge",
+        OperationOutcome(
+            OperationState.PROVIDER_PENDING, correlation="provider-charge"
+        ),
+    )
+    assert late.operation.state == OperationState.SUCCEEDED
+    assert late.facts.captured_funds == D("40")
+    replay = await repository.apply_observation(
+        "payment",
+        PaymentObservation(
+            payment_event=PaymentEvent.PAYMENT_CAPTURED,
+            paid_amount=D("40"),
+            operation_id="charge",
+            outcome=OperationOutcome(
+                OperationState.SUCCEEDED,
+                settled_amount=D("40"),
+                correlation="provider-charge",
+            ),
+            provider_event_id="callback",
+        ),
+    )
+    assert not replay.applied
