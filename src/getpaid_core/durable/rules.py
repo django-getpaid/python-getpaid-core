@@ -17,6 +17,7 @@ from typing import cast
 
 from getpaid_core._amounts import validate_amount
 from getpaid_core._amounts import validate_payment_amounts
+from getpaid_core.durable.evidence import normalize_outcome
 from getpaid_core.durable.records import CANCELLATION_CORRELATION
 from getpaid_core.durable.records import CANCELLATION_TARGET
 from getpaid_core.durable.records import TERMINAL_OPERATION_STATES
@@ -269,7 +270,7 @@ def _validate_observation(update: PaymentUpdate) -> None:
         return
     if not isinstance(update.outcome, OperationOutcome):
         raise InvalidTransitionError("Observation outcome must be normalized.")
-    outcome = update.outcome
+    outcome = normalize_outcome(update.outcome)
     if type(outcome.reconciliation_required) is not bool:
         raise InvalidTransitionError(
             "Outcome reconciliation must be a boolean."
@@ -895,6 +896,7 @@ def plan_outcome(
     bound even when cancellation let their reservation baselines overlap.
     """
     operations = tuple(operations)
+    outcome = normalize_outcome(outcome)
     if type(outcome.reconciliation_required) is not bool:
         raise InvalidTransitionError(
             "Outcome reconciliation_required must be a boolean."

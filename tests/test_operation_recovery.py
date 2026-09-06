@@ -129,6 +129,51 @@ async def test_post_provider_failure_retains_normalized_evidence_and_intent(
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize(
+    "handle",
+    [
+        "https://provider.test/?token=secret",
+        "id\nsecret",
+        {"token": "secret"},
+        "x" * 201,
+    ],
+)
+async def test_untrusted_handles_are_not_exposed_in_recovery_or_committed(
+    handle,
+):
+    outcome = OperationOutcome(OperationState.SUCCEEDED, correlation=handle)
+    repository, flow, intent, _ = await recovery_flow(
+        OperationType.CHARGE, outcome
+    )
+    with pytest.raises(OperationEvidenceError) as caught:
+        await flow.execute_operation("pay", intent, now=NOW)
+    assert caught.value.context["correlation"] is None
+    assert caught.value.context["evidence"].correlation is None
+    assert "secret" not in repr(caught.value.context)
+    record = await repository.get_operation("pay", "intent")
+    assert record.correlation is None
+    assert "secret" not in repr(record.recovery_evidence)
+    with pytest.raises(InvalidTransitionError):
+        await repository.record_operation_outcome("pay", "intent", outcome)
+
+
+async def test_result_repr_excludes_metadata_and_frozen_provider_parameters():
+    from dataclasses import replace
+
+    from getpaid_core.durable import OperationResult
+
+    repository, flow, intent, _ = await recovery_flow(
+        OperationType.CHARGE, OperationOutcome(OperationState.PROVIDER_PENDING)
+    )
+    result = await flow.execute_operation("pay", intent, now=NOW)
+    result = OperationResult(
+        replace(result.operation, parameters={"token": "secret"}),
+        replace(result.snapshot, provider_data={"token": "secret"}),
+    )
+    assert "secret" not in repr(result)
+    assert result.evidence.state is OperationState.PROVIDER_PENDING
+
+
 async def test_operator_resolution_commits_audit_with_settlement_and_no_submission():
     from getpaid_core.durable import OperatorResolution
 
