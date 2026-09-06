@@ -64,6 +64,14 @@
    :undoc-members:
 ```
 
+## Durable Migration
+
+```{eval-rst}
+.. automodule:: getpaid_core.durable.migration
+   :members:
+   :undoc-members:
+```
+
 ## Durable Flow
 
 ```{eval-rst}

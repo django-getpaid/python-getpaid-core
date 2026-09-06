@@ -58,9 +58,9 @@ it:
 - **Storage engine and schema** — relational, document or JSON storage
   are all acceptable, with the same atomicity and durability guarantees.
   Core adds no ORM models, migrations, scheduler or database dependency.
-- **Retention and archival** of operation and replay records, subject to
-  the ADR's rule that archival must not turn an old retry into a fresh
-  transaction.
+- **Storage and archival mechanics** for operation and replay records —
+  where they live and how they are archived, within the retention rules
+  below.
 - **Scheduling and operator escalation** — core exposes unresolved work
   through `list_unresolved_operations()`; who polls it, and who is
   allowed to resolve it, belongs to the application.
@@ -97,6 +97,138 @@ unconditionally, and no capability sniffing that quietly picks a weaker
 path: an adapter that cannot make the guarantee must not move money in a
 way that claims it.
 
+## Who owns replay evidence
+
+Replay bookkeeping is core-owned and lives in `ReplayRecord`, in storage
+of its own. It is never an entry in `provider_data`, which is
+unrestricted plugin metadata that every processor update merges into.
+That separation is the whole point: while the two shared one mapping, a
+payload carrying an `applied_event_ids` key could replace committed
+history, or prepopulate an identity for an event that never arrived and
+so suppress the genuine capture that followed it.
+
+A `ReplayRecord` is compared on two things:
+
+- **Scope** — `(payment_id, backend, event_identity)`. An event identity
+  is unique within one payment at one provider, and the scope is read
+  from the payment's *stored* facts, so a payload cannot nominate the
+  context it is compared in.
+- **Content** — a digest of the observation's core-owned semantic fields
+  only. The provider payload is deliberately excluded, so a
+  retransmission differing in transport noise still reads as the same
+  event, while the same identity carrying different money does not.
+
+Same scope and same content is a genuine duplicate: idempotent, nothing
+applied. Same scope and *different* content is conflicting reuse: core
+refuses to apply it and flags the payment for reconciliation rather than
+letting a reused identity silently suppress a financial change.
+
+`provider_data` keys that look like the old bookkeeping —
+`getpaid_core.durable.LEGACY_REPLAY_METADATA_KEYS` names them — are kept
+as ordinary readable metadata and never consulted. They are not rejected:
+refusing an observation because of one of its metadata keys would hand
+any provider payload the power to suppress a genuine financial change,
+which is the failure this design exists to prevent.
+
+What *is* rejected is metadata core cannot store: a `provider_data` that
+is not a mapping, a non-string key, or a non-string event identity. The
+refusal happens before anything is planned, so the adapter's boundary
+commits nothing and both committed funds and committed history survive
+it intact.
+
+## Migrating released 3.x records
+
+`getpaid_core.durable.migration` maps one stored legacy payment onto
+durable facts. Core owns the mapping; the framework wrapper owns the
+migration — reading rows, writing them back, its schema changes, and
+sequencing the whole thing against the writer cutover below.
+
+```python
+from getpaid_core.durable import LegacyPaymentState, plan_migration
+
+plan = plan_migration(LegacyPaymentState.from_payment(payment))
+await my_repository.write_migrated(plan.facts)   # adapter-side write
+```
+
+Amounts, status and metadata are preserved exactly as stored. Two things
+are never produced:
+
+- **Replay evidence.** The released contract kept its applied-event list
+  inside `provider_data`, where processor metadata could overwrite it.
+  History that provider payloads had write access to cannot be certified
+  after the fact, so it migrates as readable metadata, not as trusted
+  evidence. A redelivery of one of those events therefore applies again;
+  cumulative observations keep that harmless to the totals, but
+  exactly-once delivery is no longer claimed for the payment's past.
+- **Operation records.** The released contract recorded no operation
+  identity, and inventing one would hand a historical retry a
+  reservation it never had.
+
+`plan_migration` reports what it established as `MigrationFinding`s:
+
+| Finding | Meaning | Blocks mutation |
+|---------|---------|-----------------|
+| `AMBIGUOUS_FINANCIAL_RECORD` | The balances break the financial invariants, or the status is not one core defines | yes |
+| `PENDING_OPERATION` | The record was left mid-operation, with no operation identity to resolve it against | yes |
+| `UNPROMOTED_EVENT_HISTORY` | It carried a legacy applied-event list, kept readable and untrusted | no |
+
+A blocking finding sets `reconciliation_required` on the migrated facts,
+which is what `plan_reservation` enforces: the payment is **readable and
+still takes observations** — callbacks and reconciliation continue — but
+no *new* command may be reserved, and the attempt raises
+`ReconciliationBlockedError`. Operations already reserved still resume
+and still resolve, so blocking never strands outstanding work. An
+unpromoted event history is deliberately not blocking: every legacy
+payment that ever saw a callback carries one, and blocking them all would
+migrate the whole estate into reconciliation.
+
+Clearing the requirement is the application's reconciliation step, and an
+adapter-side write like the migration itself. Core supplies the
+invariants and the block; establishing what actually happened at the
+provider, and recording who decided it, belongs above core.
+
+A record whose balances are not finite `Decimal` money raises
+`InvalidTransitionError` instead of migrating: there is nothing to
+reconcile against, and the source data has to be repaired first.
+
+## Coordinated writer cutover
+
+Old unconditional-save workers must **stop before** new-contract writes
+begin. The two flows must not write the same payment state: `PaymentFlow`
+saves whatever object a caller handed it, so a single surviving legacy
+worker can overwrite facts the durable path committed, and neither side
+detects it.
+
+The order that holds:
+
+1. Stop every writer using `PaymentFlow` for the payments being migrated
+   — web callbacks, pollers, scheduled jobs, management commands.
+2. Migrate the records with `plan_migration`, writing the facts through
+   the adapter.
+3. Start the new writers on `DurablePaymentFlow`.
+
+Do not run the two concurrently against one payment, and do not migrate
+under live legacy traffic. Reads may continue throughout.
+
+## Retention
+
+Operation and replay records are compact and are kept for the payment's
+**supported lifetime**, with no automatic expiry in this contract.
+Deduplication that expires is deduplication that stops working, and an
+operation record is the recovery anchor for an outcome that was never
+established.
+
+- **Sensitive provider evidence has its own retention.** Raw payloads and
+  correlation captured for recovery are governed by the application's
+  data-retention policy, separately from the compact records core needs.
+- **Archival and deletion need an explicit policy**, and it must not turn
+  an old retry into a fresh transaction: dropping the replay evidence for
+  an event a provider may still redeliver, or the record of an operation
+  a caller may still repeat, converts a duplicate into new money.
+- **Local retention never extends a provider's idempotency window.**
+  Keeping a record longer than the provider honours its key does not make
+  resubmission safe.
+
 ## Proving an adapter conforms
 
 `getpaid_core.durable.conformance` ships the checks an adapter must pass.
@@ -120,8 +252,10 @@ through the repository, never through an object it handed out earlier.
 That distinction matters: a shared mutable fake passes races it should
 fail, so it is not evidence. The checks cover a stale cumulative capture
 racing a full one, a capture racing a refund, duplicate versus distinct
-event identities, discovery of unresolved work, and refusal of
-overlapping commands.
+event identities, discovery of unresolved work, refusal of overlapping
+commands, metadata that tries to forge or erase replay history, atomic
+rejection of malformed metadata, and refusal of new commands on a payment
+awaiting reconciliation.
 
 Those callers are concurrent tasks, not separate processes. Passing
 proves the semantic contract against your own storage; it proves nothing
@@ -172,10 +306,6 @@ These are deliberately absent here and tracked separately:
   `start_refund()` and friends through reservations, submission rights
   and provider idempotency keys. This layer supplies the reservation and
   outcome mechanics those will use.
-- **Ownership and migration of existing payment metadata** — replay
-  evidence is core-owned as `ReplayRecord` from here on, but migrating
-  the historical `provider_data["applied_event_ids"]` lists is separate
-  work.
 - **What a processor receives** — the durable flow still builds the
   processor from the caller's payment object, so a processor can read
   stale financial fields from it even though nothing is written back.

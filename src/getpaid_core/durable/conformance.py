@@ -19,6 +19,10 @@ capture cannot regress committed funds, a capture racing a refund keeps
 both totals, duplicate event identities apply once while distinct ones
 all survive, and unresolved work -- outstanding operations and payments
 flagged for reconciliation alike -- stays discoverable after the fact.
+It also checks who owns replay evidence: provider metadata must be unable
+to seed or erase it, a malformed payload must be refused without costing
+committed funds or history, and a payment awaiting reconciliation must
+refuse new commands.
 
 Passing proves the semantic contract against the adapter's own storage.
 It proves nothing about a live provider, and nothing about behaviour
@@ -30,6 +34,8 @@ import asyncio
 from collections.abc import Awaitable
 from collections.abc import Callable
 from decimal import Decimal
+from typing import Any
+from typing import cast
 
 from getpaid_core.durable.records import OperationIntent
 from getpaid_core.durable.records import OperationOutcome
@@ -40,7 +46,9 @@ from getpaid_core.durable.repository import DurablePaymentRepository
 from getpaid_core.enums import PaymentEvent
 from getpaid_core.enums import PaymentStatus
 from getpaid_core.exceptions import ConformanceError
+from getpaid_core.exceptions import InvalidTransitionError
 from getpaid_core.exceptions import OperationConflictError
+from getpaid_core.exceptions import ReconciliationBlockedError
 from getpaid_core.types import PaymentUpdate
 
 
@@ -263,6 +271,132 @@ async def check_reconciliation_flags_are_enumerable(
     )
 
 
+async def check_metadata_cannot_forge_replay_history(
+    factory: RepositoryFactory,
+) -> None:
+    """Provider metadata can neither seed nor erase trusted evidence.
+
+    An adapter that keeps replay records in the same mapping it merges
+    processor metadata into fails here: the forged identity suppresses
+    the genuine capture that follows it.
+    """
+    repository = await factory(_prepared_facts())
+
+    await repository.apply_observation(
+        PAYMENT_ID,
+        PaymentUpdate(
+            payment_event=PaymentEvent.PAYMENT_CAPTURED,
+            paid_amount=Decimal("40.00"),
+            provider_event_id="first",
+            provider_data={"applied_event_ids": ["future"]},
+        ),
+    )
+    genuine = await repository.apply_observation(
+        PAYMENT_ID, _capture("100.00", "future")
+    )
+    _require(
+        genuine.applied,
+        "forged metadata suppressed a genuine capture",
+    )
+
+    facts = await repository.get_payment_facts(PAYMENT_ID)
+    _require(
+        facts.captured_funds == REQUIRED,
+        f"forged metadata left captured funds at {facts.captured_funds}",
+    )
+
+    await repository.apply_observation(
+        PAYMENT_ID,
+        PaymentUpdate(
+            payment_event=PaymentEvent.PAYMENT_CAPTURED,
+            paid_amount=REQUIRED,
+            provider_event_id="erasing",
+            provider_data={"applied_event_ids": []},
+        ),
+    )
+    replayed = await repository.apply_observation(
+        PAYMENT_ID, _capture("100.00", "future")
+    )
+    _require(
+        not replayed.applied,
+        "metadata erased committed replay evidence",
+    )
+
+
+async def check_malformed_metadata_is_rejected_atomically(
+    factory: RepositoryFactory,
+) -> None:
+    """A refused observation loses neither funds nor committed history."""
+    repository = await factory(_prepared_facts())
+    await repository.apply_observation(PAYMENT_ID, _capture("40.00", "e-1"))
+
+    # Annotated as ``dict[str, Any]`` and violated on purpose: the check
+    # exists because a plugin building metadata at runtime can produce a
+    # key no annotation stopped it from producing.
+    malformed = cast("dict[str, Any]", {1: "not a string key"})
+
+    try:
+        await repository.apply_observation(
+            PAYMENT_ID,
+            PaymentUpdate(
+                payment_event=PaymentEvent.PAYMENT_CAPTURED,
+                paid_amount=REQUIRED,
+                provider_event_id="e-2",
+                provider_data=malformed,
+            ),
+        )
+    except InvalidTransitionError:
+        pass
+    else:
+        raise ConformanceError("malformed metadata was accepted")
+
+    facts = await repository.get_payment_facts(PAYMENT_ID)
+    _require(
+        facts.captured_funds == Decimal("40.00"),
+        f"a rejected observation moved funds to {facts.captured_funds}",
+    )
+    replayed = await repository.apply_observation(
+        PAYMENT_ID, _capture("40.00", "e-1")
+    )
+    _require(
+        not replayed.applied,
+        "a rejected observation lost committed replay evidence",
+    )
+
+
+async def check_reconciliation_blocks_new_commands(
+    factory: RepositoryFactory,
+) -> None:
+    """A payment awaiting reconciliation refuses to reserve new work.
+
+    This is the state a migrated ambiguous record lands in, and the one
+    contradictory evidence produces. Outstanding operations still
+    resolve; only new commands are refused.
+    """
+    repository = await factory(
+        PaymentFacts(
+            payment_id=PAYMENT_ID,
+            amount_required=REQUIRED,
+            remaining_authorization=REQUIRED,
+            status=PaymentStatus.PRE_AUTH,
+            reconciliation_required=True,
+        )
+    )
+
+    try:
+        await repository.reserve_operation(
+            PAYMENT_ID,
+            OperationIntent(
+                operation_id="op-1", operation_type=OperationType.CHARGE
+            ),
+        )
+    except ReconciliationBlockedError:
+        return
+    raise ConformanceError(
+        "a payment awaiting reconciliation reserved a new command"
+    )
+
+
 async def check_outstanding_operation_blocks_unrelated_commands(
     factory: RepositoryFactory,
 ) -> None:
@@ -320,6 +454,18 @@ CONFORMANCE_CHECKS: tuple[
     (
         "outstanding_operation_blocks_unrelated_commands",
         check_outstanding_operation_blocks_unrelated_commands,
+    ),
+    (
+        "metadata_cannot_forge_replay_history",
+        check_metadata_cannot_forge_replay_history,
+    ),
+    (
+        "malformed_metadata_is_rejected_atomically",
+        check_malformed_metadata_is_rejected_atomically,
+    ),
+    (
+        "reconciliation_blocks_new_commands",
+        check_reconciliation_blocks_new_commands,
     ),
 )
 

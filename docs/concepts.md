@@ -124,8 +124,10 @@ provider data and must not be logged or exposed indiscriminately.
   updates. Invalid updates roll back amounts, status, external ID, fraud state,
   metadata, and the provider event ID. Already-applied event IDs remain no-op
   replays, even if the available authorization has since changed.
-- `provider_data` stores provider-specific metadata such as refund IDs and applied
-  callback IDs.
+- `provider_data` stores provider-specific metadata such as refund IDs, and — on
+  this released path only — the applied callback IDs. Under the durable contract
+  replay evidence is core-owned and lives outside `provider_data`; see
+  [Durable Storage Contract](durable-storage.md).
 
 These checks protect the current payment snapshot; they do not reserve pending
 amounts, serialize concurrent calls, or provide an operation-idempotency contract.
@@ -227,7 +229,9 @@ the payment's *current* stored state, and returns committed state.
 refuses any repository that does not implement it; `PaymentFlow` keeps
 the released behaviour over `PaymentRepository`. See
 [Durable Storage Contract](durable-storage.md) for the mandatory and
-optional capabilities and the upgrade boundary.
+optional capabilities, replay-evidence ownership, and the upgrade
+boundary — including migrating released records and the writer cutover
+that must precede the first new-contract write.
 
 ## Plugin Registry
 
