@@ -376,3 +376,20 @@ async def test_unresolved_refund_status_starts_at_reservation_and_pending_cannot
     assert later_unknown.facts.status is PaymentStatus.REFUND_STARTED
     assert later_unknown.facts.refunded_funds == Decimal("0")
     assert later_unknown.facts.captured_funds == Decimal("100")
+
+
+def test_release_response_after_callback_preserves_confirmed_release():
+    facts = authorized_facts()
+    operation = plan_reservation(
+        facts, (), OperationIntent("release-1", OperationType.RELEASE_LOCK)
+    ).operation
+    callback_facts = replace(
+        facts,
+        remaining_authorization=Decimal("0"),
+        status=PaymentStatus.CANCELLED,
+    )
+    response = plan_outcome(
+        callback_facts, operation, OperationOutcome(OperationState.SUCCEEDED)
+    )
+    assert response.operation.state is OperationState.SUCCEEDED
+    assert response.facts == callback_facts

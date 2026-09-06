@@ -579,6 +579,11 @@ def plan_outcome(
                 related = (replace(target, state=OperationState.REJECTED),)
             update = replace(update, payment_event=None)
         elif (
+            operation.operation_type is OperationType.RELEASE_LOCK
+            and facts.remaining_authorization == 0
+        ):
+            update = replace(update, payment_event=None)
+        elif (
             operation.operation_type is OperationType.PREPARE
             and facts.status != PaymentStatus.NEW
         ):
