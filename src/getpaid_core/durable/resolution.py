@@ -164,17 +164,14 @@ def plan_resolution(
             correcting_settlement = True
     operations = tuple(operations)
     if (
-        (
-            correcting_settlement
-            or (
-                operation.state is OperationState.REJECTED
-                and outcome.state is OperationState.SUCCEEDED
-            )
+        correcting_settlement
+        or (
+            operation.state is OperationState.REJECTED
+            and outcome.state is OperationState.SUCCEEDED
         )
-        and any(
-            entry.reservation_sequence > operation.reservation_sequence
-            for entry in operations
-        )
+    ) and any(
+        entry.reservation_sequence > operation.reservation_sequence
+        for entry in operations
     ):
         raise InvalidTransitionError(
             "Cannot change settlement after later intents; reconcile "

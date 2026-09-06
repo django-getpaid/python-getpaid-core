@@ -13,6 +13,7 @@ from getpaid_core.durable import OperationType
 from getpaid_core.durable import OperatorResolution
 from getpaid_core.durable import PaymentFacts
 from getpaid_core.durable import PaymentObservation
+from getpaid_core.enums import PaymentStatus
 from getpaid_core.exceptions import InvalidTransitionError
 from getpaid_core.exceptions import OperationConflictError
 from getpaid_core.exceptions import StateConflictError
@@ -167,7 +168,9 @@ async def test_operator_corrects_partial_capture_without_replaying_settlement():
     )
     corrected = replace(original, settled_amount=Decimal("30"))
     await repository.record_operation_outcome("pay", "capture", original)
-    before = await repository.record_operation_outcome("pay", "capture", corrected)
+    before = await repository.record_operation_outcome(
+        "pay", "capture", corrected
+    )
     assert before.facts.captured_funds == Decimal("20")
     assert before.operation.conflicting_outcomes == (corrected,)
     resolution = decision(outcome=corrected, clear_payment_reconciliation=True)
@@ -189,7 +192,9 @@ async def test_operator_corrects_partial_capture_without_replaying_settlement():
     assert original in resolved.operation.conflicting_outcomes
     assert corrected in resolved.operation.conflicting_outcomes
     assert await repository.get_payment_facts("pay") == resolved.facts
-    assert await repository.get_operation("pay", "capture") == resolved.operation
+    assert (
+        await repository.get_operation("pay", "capture") == resolved.operation
+    )
     retried = await repository.resolve_operation(
         "pay",
         "capture",
@@ -198,13 +203,171 @@ async def test_operator_corrects_partial_capture_without_replaying_settlement():
         expected_operation=before.operation,
     )
     assert retried == resolved
-    repeated = await repository.record_operation_outcome("pay", "capture", corrected)
+    repeated = await repository.record_operation_outcome(
+        "pay", "capture", corrected
+    )
     assert repeated == resolved
-    disputed_again = await repository.record_operation_outcome("pay", "capture", original)
+    disputed_again = await repository.record_operation_outcome(
+        "pay", "capture", original
+    )
     assert disputed_again.operation.reconciliation_required
     assert disputed_again.facts.captured_funds == Decimal("30")
     assert disputed_again.facts.remaining_authorization == Decimal("70")
     assert disputed_again.operation.resolutions == (resolution,)
+
+
+async def partial_settlement(operation_type):
+    is_capture = operation_type is OperationType.CHARGE
+    repository = InMemoryDurableRepository(
+        [
+            PaymentFacts(
+                "pay",
+                Decimal("100"),
+                captured_funds=Decimal("10") if is_capture else Decimal("100"),
+                refunded_funds=Decimal("0") if is_capture else Decimal("10"),
+                remaining_authorization=Decimal("90")
+                if is_capture
+                else Decimal("0"),
+                status=PaymentStatus.PARTIAL
+                if is_capture
+                else PaymentStatus.PARTIALLY_REFUNDED,
+            )
+        ]
+    )
+    await repository.reserve_operation(
+        "pay", OperationIntent("partial", operation_type, Decimal("30"))
+    )
+    await repository.record_operation_outcome(
+        "pay",
+        "partial",
+        OperationOutcome(
+            OperationState.SUCCEEDED, settled_amount=Decimal("20")
+        ),
+    )
+    return repository
+
+
+@pytest.mark.parametrize(
+    "operation_type", [OperationType.CHARGE, OperationType.START_REFUND]
+)
+@pytest.mark.parametrize("observed_total", [None, Decimal("40"), Decimal("50")])
+@pytest.mark.parametrize("settled_amount", [None, Decimal("30")])
+async def test_correction_uses_reserved_baseline_without_double_counting_observed_money(
+    operation_type, observed_total, settled_amount
+):
+    repository = await partial_settlement(operation_type)
+    if observed_total is not None:
+        await repository.apply_observation(
+            "pay",
+            PaymentObservation(
+                **{
+                    "paid_amount"
+                    if operation_type is OperationType.CHARGE
+                    else "refunded_amount": observed_total,
+                }
+            ),
+        )
+    facts = await repository.get_payment_facts("pay")
+    operation = await repository.get_operation("pay", "partial")
+    result = await repository.resolve_operation(
+        "pay",
+        "partial",
+        decision(
+            outcome=OperationOutcome(
+                OperationState.SUCCEEDED, settled_amount=settled_amount
+            )
+        ),
+        expected_facts=facts,
+        expected_operation=operation,
+    )
+    expected_total = (
+        Decimal("50") if observed_total == Decimal("50") else Decimal("40")
+    )
+    assert result.operation.settled_amount == Decimal("30")
+    if operation_type is OperationType.CHARGE:
+        assert result.facts.captured_funds == expected_total
+        assert result.facts.remaining_authorization == (
+            Decimal("50") if observed_total == Decimal("50") else Decimal("60")
+        )
+        assert result.facts.refunded_funds == Decimal("0")
+    else:
+        assert result.facts.captured_funds == Decimal("100")
+        assert result.facts.refunded_funds == expected_total
+        assert result.facts.remaining_authorization == Decimal("0")
+
+
+@pytest.mark.parametrize(
+    "operation_type", [OperationType.CHARGE, OperationType.START_REFUND]
+)
+@pytest.mark.parametrize(
+    "amount",
+    [
+        Decimal("10"),
+        Decimal("31"),
+        Decimal("101"),
+        Decimal("NaN"),
+        Decimal("Infinity"),
+        "30",
+    ],
+)
+async def test_invalid_settlement_correction_leaves_facts_evidence_and_audit_unchanged(
+    operation_type, amount
+):
+    repository = await partial_settlement(operation_type)
+    facts = await repository.get_payment_facts("pay")
+    operation = await repository.get_operation("pay", "partial")
+    with pytest.raises(InvalidTransitionError):
+        await repository.resolve_operation(
+            "pay",
+            "partial",
+            decision(
+                outcome=OperationOutcome(
+                    OperationState.SUCCEEDED, settled_amount=amount
+                )
+            ),
+            expected_facts=facts,
+            expected_operation=operation,
+        )
+    assert await repository.get_payment_facts("pay") == facts
+    assert await repository.get_operation("pay", "partial") == operation
+
+
+@pytest.mark.parametrize(
+    "operation_type", [OperationType.CHARGE, OperationType.START_REFUND]
+)
+@pytest.mark.parametrize(
+    "later_state",
+    [
+        OperationState.RESERVED,
+        OperationState.SUCCEEDED,
+        OperationState.REJECTED,
+    ],
+)
+async def test_settlement_correction_cannot_reuse_baseline_after_later_intents(
+    operation_type, later_state
+):
+    repository = await partial_settlement(operation_type)
+    await repository.reserve_operation(
+        "pay", OperationIntent("later", operation_type, Decimal("10"))
+    )
+    if later_state is not OperationState.RESERVED:
+        await repository.record_operation_outcome(
+            "pay", "later", OperationOutcome(later_state)
+        )
+    facts = await repository.get_payment_facts("pay")
+    operation = await repository.get_operation("pay", "partial")
+    later = await repository.get_operation("pay", "later")
+    with pytest.raises(InvalidTransitionError, match="later intents"):
+        await repository.resolve_operation(
+            "pay",
+            "partial",
+            decision(),
+            expected_facts=facts,
+            expected_operation=operation,
+        )
+    assert await repository.get_payment_facts("pay") == facts
+    assert await repository.get_operation("pay", "partial") == operation
+    assert await repository.get_operation("pay", "later") == later
 
 
 async def test_resolution_cannot_erase_confirmed_effects_or_reuse_audit_identity():

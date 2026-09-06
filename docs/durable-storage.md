@@ -383,12 +383,24 @@ command is sent. Local storage errors propagate; retry the same decision identit
 
 The planner reuses financial rules and complete history. It cannot undo confirmed
 capture/refund, force impossible amounts into balances or silently replace known
-correlation. A rejected operation cannot be changed to succeeded after any later
-intent was reserved: its old starting totals cannot establish the combined effect
-safely. Reconcile trustworthy cumulative provider evidence first through the
-integration; do not force an old reservation baseline over subsequent work.
-Prior disputed outcomes, observation conflicts and recovery claims remain retained. New contradictory callbacks flag reconciliation again; the audit
-never suppresses provider evidence. Release/cancellation cannot invent returned
+correlation. An audited decision may increase an already-succeeded capture/refund's
+settled amount within its original reservation. The corrected cumulative total uses
+the reservation's starting funds, not an increment added to current funds: a capture
+reserved for 30, recorded as 20, then corrected to 30 against an initial hold of 100
+ends at captured=30, hold=70. A cumulative observation that already recorded that
+money is not counted twice. The superseded successful amount/correlation is retained
+in `conflicting_outcomes`, alongside existing disputes and the new resolution audit.
+Ordinary provider outcomes still flag terminal discrepancies rather than correcting
+them automatically.
+
+Neither an upward settlement correction nor changing a rejected operation to
+succeeded is allowed after any later intent was reserved: the old starting totals
+cannot establish the combined effect safely. Reconcile trustworthy cumulative
+provider evidence through the integration; do not force an old reservation baseline
+over subsequent work.
+Prior disputed outcomes, observation conflicts and recovery claims remain retained.
+New contradictory callbacks flag reconciliation again; the audit never suppresses
+provider evidence. Release/cancellation cannot invent returned
 funds or erase racing refund settlement.
 
 Resolving an operation clears only its own reconciliation flag. To acknowledge the
