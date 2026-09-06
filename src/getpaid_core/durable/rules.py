@@ -31,6 +31,9 @@ from getpaid_core.enums import PaymentEvent
 from getpaid_core.exceptions import InvalidTransitionError
 from getpaid_core.exceptions import OperationConflictError
 from getpaid_core.fsm import apply_payment_update
+from getpaid_core.fsm import capturable_amount
+from getpaid_core.fsm import refundable_amount
+from getpaid_core.fsm import require_capture_eligible
 from getpaid_core.types import PaymentUpdate
 
 
@@ -139,17 +142,6 @@ def plan_observation(
     )
 
 
-def _capturable(facts: PaymentFacts) -> Decimal:
-    return min(
-        facts.remaining_authorization,
-        facts.amount_required - facts.captured_funds,
-    )
-
-
-def _refundable(facts: PaymentFacts) -> Decimal:
-    return facts.captured_funds - facts.refunded_funds
-
-
 def _resolve_amount(
     facts: PaymentFacts, intent: OperationIntent
 ) -> Decimal | None:
@@ -175,10 +167,17 @@ def _resolve_amount(
             )
         return available
 
+    # The eligibility rule and the amount bounds live in the state
+    # engine, so a reservation and a ``PaymentFlow`` command cannot drift
+    # apart. Running them here, at reservation time, is what refuses an
+    # ineligible capture *before* submission rather than after the
+    # provider has moved the money.
+    view = cast("Payment", _FactsPayment(facts))
     if operation_type is OperationType.CHARGE:
-        available, name = _capturable(facts), "Charge amount"
+        require_capture_eligible(view)
+        available, name = capturable_amount(view), "Charge amount"
     else:
-        available, name = _refundable(facts), "Refund amount"
+        available, name = refundable_amount(view), "Refund amount"
 
     amount = available if intent.amount is None else intent.amount
     validate_amount(amount, name, allow_zero=False, maximum=available)

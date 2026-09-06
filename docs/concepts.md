@@ -13,35 +13,67 @@ Payments move through these states:
 | `PARTIAL` | `"partially_paid"` | Some amount received |
 | `PAID` | `"paid"` | Fully paid |
 | `FAILED` | `"failed"` | Payment failed |
-| `REFUND_STARTED` | `"refund_started"` | Refund initiated |
-| `REFUNDED` | `"refunded"` | Fully refunded (money moved back to the buyer) |
-| `CANCELLED` | `"cancelled"` | Pre-auth lock released with nothing captured |
+| `REFUND_STARTED` | `"refund_started"` | Refund initiated, not yet resolved |
+| `PARTIALLY_REFUNDED` | `"partially_refunded"` | Some captured funds returned |
+| `REFUNDED` | `"refunded"` | Every captured fund returned to the buyer |
+| `CANCELLED` | `"cancelled"` | Authorization released with nothing captured |
 
 ## Payment Events
 
 ```
 prepared         -> PREPARED
 locked           -> PRE_AUTH
-charge_requested -> IN_CHARGE
-payment_captured -> PARTIAL or PAID
+charge_requested -> IN_CHARGE (nothing captured yet) or unchanged
+payment_captured -> projected status
 failed           -> FAILED
 refund_requested -> REFUND_STARTED
-refund_confirmed -> PARTIAL or REFUNDED
-refund_cancelled -> active paid status
-lock_released    -> CANCELLED (nothing paid) or REFUNDED (partially captured)
+refund_confirmed -> projected status
+refund_cancelled -> projected status
+lock_released    -> projected status
 ```
+
+### Status Projection
+
+Captured funds, refunded funds and the remaining authorization are three
+orthogonal facts. The status is a *projection* of them, not a fourth fact, and
+`getpaid_core.fsm.project_payment_status` derives it in this precedence:
+
+1. an unresolved refund reports `REFUND_STARTED`, keeping the amounts intact;
+2. otherwise refunded funds report `REFUNDED` when they equal the captured
+   funds, and `PARTIALLY_REFUNDED` otherwise;
+3. otherwise captured funds report `PAID` when they equal `amount_required`,
+   and `PARTIAL` (partially *paid*) otherwise;
+4. otherwise a positive remaining authorization reports `PRE_AUTH`, and a
+   confirmed release of the whole of it reports `CANCELLED`.
+
+Where no settlement rule applies the payment keeps its current status, so
+`NEW`, `PREPARED`, `IN_CHARGE` and `FAILED` survive the projection: zero totals
+alone are not a cancellation. `amount_locked` and any reconciliation
+requirement stay separately visible — one status never describes the whole
+financial state.
 
 ### Transition Rules
 
 The state engine raises `InvalidTransitionError` when an event is incompatible
 with the current payment state. This applies to *every* event, including
-`prepared` and `locked` — there are no silently ignored events.
+`prepared` and `locked` — there are no silently ignored events. Eligibility
+follows the payment's current facts rather than the status it happens to hold.
 
-- You cannot capture a payment after it is already refunded.
-- You cannot start a refund before the payment has been paid.
-- Refund confirmation moves to `REFUNDED` only when `amount_refunded >= amount_paid`.
-- Releasing a pre-auth lock with nothing captured marks the payment
-  `CANCELLED`; if some amount was already captured, it becomes `REFUNDED`.
+- Capture needs remaining authorization and unpaid required amount. A partial
+  capture leaves the remaining authorization usable, so a subsequent capture of
+  the rest is a supported command.
+- Capture *commands* are refused once any refund is unresolved or any funds
+  have been returned: refunding does not reopen capture capacity, and
+  collecting replacement funds requires a **new payment**. Incoming capture
+  *evidence* is judged more narrowly — an equal or lower cumulative total
+  reported alongside refund progress is absorbed without regressing either
+  total — because recording what already happened is not authorizing it.
+- Refunds need captured funds not yet returned, so a partially refunded payment
+  stays refundable down to zero.
+- Releasing needs a positive remaining authorization, in any status. It removes
+  the whole of it and changes neither captured nor refunded totals, so a
+  payment with captured funds stays `PARTIAL` or `PAID` — **not** `REFUNDED`.
+  Voiding an uncaptured authorization is not a refund of the captured portion.
 
 ### Amount Handling
 
@@ -53,14 +85,14 @@ strings, floats, or integers. Stored balances must satisfy
 #### Requests and results
 
 After application operation validators run, `PaymentFlow` validates charge,
-refund, and lock-release amounts before constructing or calling the processor.
-Existing status restrictions still apply.
+refund, and lock-release amounts before constructing or calling the processor,
+together with the fact-based eligibility rules above.
 
 | Operation | Effective request | Supported result amount |
 |-----------|-------------------|-------------------------|
 | `charge` | Positive, at most `min(amount_locked, amount_required - amount_paid)` | Successful synchronous capture: positive, at most the request; async acceptance: zero through the request; decline: exactly zero |
 | `start_refund` | Positive, at most `amount_paid - amount_refunded` | Positive, at most the request; acceptance is not settlement |
-| `release_lock` | The entire positive `amount_locked` | Exactly the authorization being released; partial release is not supported |
+| `release_lock` | The entire positive `amount_locked`, whatever the status | Exactly the authorization being released; partial release is not supported |
 
 For both charge and refund, `amount=None` (including an amount removed or set to
 `None` by a validator) means the **remaining available balance**, not the original
@@ -86,8 +118,8 @@ provider data and must not be logged or exposed indiscriminately.
   `amount_paid`. Captured increments reduce `amount_locked`.
 - Within permitted lifecycle transitions, a lower valid cumulative snapshot
   preserves the larger recorded total. Negative and non-finite values are invalid,
-  not stale observations. This does not change capture/refund lifecycle ordering
-  rules or permit new transitions after refunds.
+  not stale observations. This does not change capture/refund eligibility or
+  permit capture after funds have been returned.
 - Every supplied financial field is validated, including fields on metadata-only
   updates. Invalid updates roll back amounts, status, external ID, fraud state,
   metadata, and the provider event ID. Already-applied event IDs remain no-op

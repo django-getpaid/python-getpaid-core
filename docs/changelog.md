@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+### Breaking Changes
+
+- **Partial capture no longer strands the remaining authorization**: capture
+  and authorization release are now eligible on the payment's current
+  financial facts instead of a status guard. After `lock(100)` and
+  `capture(30)`, capturing the remaining 70 or releasing it are both
+  supported commands; previously both raised `InvalidTransitionError`.
+- **Releasing an authorization is not a refund**: `LOCK_RELEASED` on a
+  payment with captured funds now projects `PARTIAL` (or `PAID`) and leaves
+  `amount_refunded` at zero. This deliberately replaces the v3.2.0 behaviour
+  documented below, which reported `REFUNDED` without any money being
+  returned. An uncaptured full release still reports `CANCELLED`.
+- **New `PaymentStatus.PARTIALLY_REFUNDED`** (`"partially_refunded"`): a
+  partly returned payment is now distinguishable from a partly paid one,
+  which both previously reported `PARTIAL`. Consumers matching on `PARTIAL`
+  after a refund must handle the new member.
+- **Refunding does not reopen capture capacity**: capture is refused once a
+  refund is unresolved or any funds have been returned, in `PaymentFlow`, in
+  the state engine and at durable reservation time. Collecting replacement
+  funds requires a new payment.
+- **Status is a projection**: `getpaid_core.fsm.project_payment_status`
+  derives the public status from captured funds, refunded funds and the
+  remaining authorization, with an unresolved refund taking precedence. Zero
+  totals alone are not a cancellation, and `NEW`, `PREPARED`, `IN_CHARGE` and
+  `FAILED` survive the projection.
+
+See `docs/adr/0001-durable-money-operations.md`, sections 4 and 5.
+
 ## v3.2.0 (2026-07-04)
 
 ### Breaking Changes

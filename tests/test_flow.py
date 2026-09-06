@@ -462,10 +462,17 @@ class TestPreconditions:
             mock_charge.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_release_lock_requires_pre_auth(self, flow):
-        payment = MockPayment(backend="mock", status=PaymentStatus.PAID)
+    async def test_release_lock_requires_a_remaining_authorization(self, flow):
+        """Release needs a remaining authorization, not a status."""
+        payment = MockPayment(
+            backend="mock",
+            status=PaymentStatus.PAID,
+            amount_paid=Decimal("100.00"),
+        )
 
-        with pytest.raises(InvalidTransitionError, match="Cannot release lock"):
+        with pytest.raises(
+            InvalidTransitionError, match="Cannot release the authorization"
+        ):
             await flow.release_lock(payment)
 
     @pytest.mark.asyncio

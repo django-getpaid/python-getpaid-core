@@ -238,7 +238,7 @@ class TestDummyFallbackEventIds:
         )
 
         assert payment.amount_refunded == Decimal("40.00")
-        assert payment.status == PaymentStatus.PARTIAL
+        assert payment.status == PaymentStatus.PARTIALLY_REFUNDED
         assert payment.provider_data["applied_event_ids"] == [
             "refund:pay-1:40"
         ]

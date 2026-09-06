@@ -148,8 +148,10 @@ adapter:
 | `reserve_operation()` / `record_operation_outcome()` | — | Returns the committed record or plan |
 | Atomicity across workers | None claimed | Guaranteed by the adapter's boundary |
 
-`PaymentFlow` is unchanged from the release: it makes none of the
-guarantees on this page, and nothing in it consults the durable contract.
+`PaymentFlow` still makes none of the guarantees on this page, and nothing
+in it consults the durable contract. Its transition rules are shared, so it
+follows the same fact-based capture/release eligibility and status
+projection as this layer; what it does not gain is atomicity.
 `DurablePaymentFlow` never writes a caller-supplied object. A framework
 wrapper may still accept a model instance for ergonomics, but only its
 identity is authoritative; previously loaded objects may be stale, and
@@ -179,8 +181,8 @@ These are deliberately absent here and tracked separately:
   stale financial fields from it even though nothing is written back.
   Giving processors operation identity and immutable submission
   parameters instead is part of the command-dispatch work.
-- **The revised public status precedence** — the ADR's rules for
-  refund-in-progress, partial refunds and authorization release change
-  what a payment status projects. Transitions here still run the released
-  state engine, so an authorization release with captured funds still
-  reports the 3.x status.
+- **Cross-channel observation reconciliation** — deciding what a stale
+  or contradictory cumulative snapshot means when it arrives during or
+  after a refund. Transitions here run the shared state engine, which
+  already projects the ADR's status precedence and its partial-capture
+  eligibility rules; correlating competing evidence is separate work.

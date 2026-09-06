@@ -145,17 +145,148 @@ def _set_locked_amount(payment: Payment, locked_amount: Decimal) -> None:
     payment.amount_locked = max(payment.amount_locked, locked_amount)
 
 
-def _active_paid_status(payment: Payment) -> PaymentStatus:
-    if (
-        payment.amount_paid >= payment.amount_required
-        and payment.amount_paid > 0
-    ):
-        return PaymentStatus.PAID
+def has_unresolved_refund(payment: Payment) -> bool:
+    """Whether the payment carries a refund that has not resolved yet.
+
+    The payment protocol has no separate pending-operation field, so
+    ``REFUND_STARTED`` is where an unresolved refund is recorded, and
+    durable facts carry that same projected status. An integration that
+    also holds operation records has a second, richer source for the
+    fact; core's transition rules read the status.
+    """
+    return coerce_payment_status(payment) is PaymentStatus.REFUND_STARTED
+
+
+def capturable_amount(payment: Payment) -> Decimal:
+    """The funds still capturable from the remaining authorization.
+
+    Capture is bounded by both the remaining authorization and the unpaid
+    part of the required amount. Refunding does not widen either bound:
+    ``amount_paid`` never decreases, so returned funds never reopen
+    capture capacity on this payment (ADR 0001, section 4).
+    """
+    return min(
+        payment.amount_locked, payment.amount_required - payment.amount_paid
+    )
+
+
+def refundable_amount(payment: Payment) -> Decimal:
+    """The captured funds not yet returned to the buyer."""
+    return payment.amount_paid - payment.amount_refunded
+
+
+def require_capture_eligible(payment: Payment) -> None:
+    """Refuse a capture *command* that current facts do not support.
+
+    This is the rule for money we are about to ask a provider to move, so
+    it runs before submission -- in ``PaymentFlow.charge`` and at durable
+    reservation time. Eligibility follows the payment's own facts rather
+    than the status it happens to hold, so a partial capture leaves the
+    remaining authorization usable. Returned funds are the hard stop:
+    refunding does not reopen capture capacity, and replacement collection
+    needs a new payment (ADR 0001, section 4).
+
+    It deliberately does *not* govern incoming evidence. A capture that
+    already happened is a fact to record, not a command to authorize;
+    see :func:`require_capture_recordable`.
+    """
+    if has_unresolved_refund(payment):
+        raise InvalidTransitionError(
+            f"Cannot charge payment {payment.id!r} while a refund is "
+            "unresolved."
+        )
+    if payment.amount_refunded > 0:
+        raise InvalidTransitionError(
+            f"Cannot charge payment {payment.id!r}: it has refunded funds, "
+            "and collecting replacement funds requires a new payment."
+        )
+
+
+def require_capture_recordable(payment: Payment) -> None:
+    """Refuse capture *evidence* the payment cannot represent.
+
+    Applying an observation is not authorizing a command, so this is much
+    narrower than :func:`require_capture_eligible`: an equal or lower
+    cumulative capture reported alongside refund progress is absorbed
+    without regressing either total (ADR 0001, section 5), and a partially
+    refunded payment still records capture evidence.
+
+    What stays refused is evidence the released contract has never
+    accepted: a capture while a refund is unresolved, and a capture on a
+    payment whose captured funds have all been returned. Reconciling those
+    against competing cross-channel evidence is separate work.
+    """
+    if has_unresolved_refund(payment):
+        raise InvalidTransitionError(
+            "Cannot capture while a refund is unresolved."
+        )
+    if payment.amount_paid > 0 and refundable_amount(payment) <= 0:
+        raise InvalidTransitionError(
+            "Cannot capture a payment whose captured funds were all "
+            "returned."
+        )
+
+
+#: Statuses the settlement rules above own. When none of those rules
+#: fires, the payment cannot still be in one of them, so the projection
+#: falls back rather than preserving a stale settlement claim.
+_SETTLEMENT_STATUSES: frozenset[PaymentStatus] = frozenset(
+    {
+        PaymentStatus.PRE_AUTH,
+        PaymentStatus.PARTIAL,
+        PaymentStatus.PARTIALLY_REFUNDED,
+        PaymentStatus.PAID,
+        PaymentStatus.REFUND_STARTED,
+        PaymentStatus.REFUNDED,
+    }
+)
+
+
+def project_payment_status(
+    payment: Payment,
+    *,
+    refund_in_progress: bool = False,
+    authorization_released: bool = False,
+) -> PaymentStatus:
+    """Project the public status from the payment's financial facts.
+
+    Captured funds, refunded funds and the remaining authorization are
+    orthogonal facts; the status is a projection of them, not a fourth
+    fact of its own (ADR 0001, section 4). The precedence is:
+
+    1. an unresolved refund reports refund-in-progress;
+    2. otherwise returned funds report fully or partially refunded;
+    3. otherwise captured funds report paid or partially paid;
+    4. otherwise a positive remaining authorization reports authorized,
+       and a confirmed release of the whole of it reports cancelled.
+
+    Zero totals alone are not a cancellation: where no settlement rule
+    applies the payment keeps its current status, so preparation, failure
+    and a previous cancellation survive the projection. A status the
+    settlement rules own but no longer support -- the refund marker a
+    cancellation just cleared, say -- is not preserved; it falls back to
+    ``PREPARED``. The remaining authorization stays separately visible on
+    the payment either way: one status never describes the whole
+    financial state.
+    """
+    if refund_in_progress:
+        return PaymentStatus.REFUND_STARTED
+    if payment.amount_refunded > 0:
+        if payment.amount_refunded >= payment.amount_paid:
+            return PaymentStatus.REFUNDED
+        return PaymentStatus.PARTIALLY_REFUNDED
     if payment.amount_paid > 0:
+        if payment.amount_paid >= payment.amount_required:
+            return PaymentStatus.PAID
         return PaymentStatus.PARTIAL
     if payment.amount_locked > 0:
         return PaymentStatus.PRE_AUTH
-    return PaymentStatus.PREPARED
+    if authorization_released:
+        return PaymentStatus.CANCELLED
+    current = coerce_payment_status(payment)
+    if current in _SETTLEMENT_STATUSES:
+        return PaymentStatus.PREPARED
+    return current
 
 
 def _snapshot_payment_state(payment: Payment) -> PaymentSnapshot:
@@ -218,26 +349,27 @@ def _apply_payment_event(payment: Payment, update: PaymentUpdate) -> None:
         )
 
     if event is PaymentEvent.CHARGE_REQUESTED:
-        if status in {PaymentStatus.PRE_AUTH, PaymentStatus.IN_CHARGE}:
+        require_capture_recordable(payment)
+        if payment.amount_paid > 0:
+            # Already partially settled: keep the settlement the facts
+            # project rather than hiding it behind an in-flight status.
+            return
+        if payment.amount_locked > 0 or status is PaymentStatus.IN_CHARGE:
             payment.status = PaymentStatus.IN_CHARGE
             return
-        if status in {PaymentStatus.PARTIAL, PaymentStatus.PAID}:
-            return
         raise InvalidTransitionError(
-            f"Cannot request charge for payment in {status.value!r} status."
+            f"Cannot request charge for payment in {status.value!r} status: "
+            "no remaining authorization to capture."
         )
 
     if event is PaymentEvent.PAYMENT_CAPTURED:
-        if status in {PaymentStatus.REFUND_STARTED, PaymentStatus.REFUNDED}:
-            raise InvalidTransitionError(
-                f"Cannot capture payment in {status.value!r} status."
-            )
+        require_capture_recordable(payment)
         if update.paid_amount is None:
             raise InvalidTransitionError(
                 "PAYMENT_CAPTURED event requires explicit paid_amount."
             )
         _set_paid_amount(payment, update.paid_amount)
-        payment.status = _active_paid_status(payment)
+        payment.status = project_payment_status(payment)
         return
 
     if event is PaymentEvent.FAILED:
@@ -260,65 +392,51 @@ def _apply_payment_event(payment: Payment, update: PaymentUpdate) -> None:
         )
 
     if event is PaymentEvent.REFUND_REQUESTED:
-        if status in {
-            PaymentStatus.PAID,
-            PaymentStatus.PARTIAL,
-            PaymentStatus.REFUND_STARTED,
-        }:
+        if refundable_amount(payment) > 0:
             payment.status = PaymentStatus.REFUND_STARTED
             return
         raise InvalidTransitionError(
-            f"Cannot start refund for payment in {status.value!r} status."
+            f"Cannot start refund for payment in {status.value!r} status: "
+            "no captured funds left to return."
         )
 
     if event is PaymentEvent.REFUND_CONFIRMED:
-        if status not in {
-            PaymentStatus.PAID,
-            PaymentStatus.PARTIAL,
-            PaymentStatus.REFUND_STARTED,
-            PaymentStatus.REFUNDED,
-        }:
+        if payment.amount_paid <= 0:
             raise InvalidTransitionError(
-                f"Cannot confirm refund for payment in {status.value!r} status."
+                f"Cannot confirm refund for payment in {status.value!r} "
+                "status: nothing was captured."
             )
         if update.refunded_amount is None:
             raise InvalidTransitionError(
                 "REFUND_CONFIRMED event requires explicit refunded_amount."
             )
         _set_refunded_amount(payment, update.refunded_amount)
-        if (
-            payment.amount_refunded >= payment.amount_paid
-            and payment.amount_paid > 0
-        ):
-            payment.status = PaymentStatus.REFUNDED
-        else:
-            payment.status = PaymentStatus.PARTIAL
+        payment.status = project_payment_status(payment)
         return
 
     if event is PaymentEvent.REFUND_CANCELLED:
-        if status in {
-            PaymentStatus.REFUND_STARTED,
-            PaymentStatus.PAID,
-            PaymentStatus.PARTIAL,
-        }:
-            payment.status = _active_paid_status(payment)
+        if has_unresolved_refund(payment) or refundable_amount(payment) > 0:
+            payment.status = project_payment_status(payment)
             return
         raise InvalidTransitionError(
             f"Cannot cancel refund for payment in {status.value!r} status."
         )
 
     if event is PaymentEvent.LOCK_RELEASED:
-        if status is PaymentStatus.PRE_AUTH:
+        if payment.amount_locked > 0:
+            # A release returns the uncaptured hold to the buyer; it
+            # moves no captured or refunded funds, so the status follows
+            # from the totals that remain.
             payment.amount_locked = Decimal("0.00")
-            # Nothing was captured: the payment was cancelled, not
-            # refunded. Keep REFUNDED only when money actually moved.
-            if payment.amount_paid > 0:
-                payment.status = PaymentStatus.REFUNDED
-            else:
-                payment.status = PaymentStatus.CANCELLED
+            payment.status = project_payment_status(
+                payment,
+                refund_in_progress=has_unresolved_refund(payment),
+                authorization_released=True,
+            )
             return
         raise InvalidTransitionError(
-            f"Cannot release lock for payment in {status.value!r} status."
+            f"Cannot release lock for payment in {status.value!r} status: "
+            "no remaining authorization is held."
         )
 
     raise InvalidTransitionError(f"Unsupported payment event: {event!r}")

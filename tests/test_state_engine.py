@@ -446,9 +446,16 @@ class TestLockReleased:
         assert payment.status == PaymentStatus.CANCELLED
         assert payment.amount_locked == Decimal("0.00")
 
-    def test_lock_released_with_partial_paid_marks_refunded(self) -> None:
-        """LOCK_RELEASED when some amount was already captured keeps the
-        historical REFUNDED status."""
+    def test_lock_released_with_partial_paid_stays_partially_paid(
+        self,
+    ) -> None:
+        """LOCK_RELEASED after a partial capture is not a refund.
+
+        This deliberately replaces the historical REFUNDED expectation:
+        voiding an uncaptured authorization returns nothing to the buyer,
+        so the captured funds stay reported as a partial payment
+        (ADR 0001, section 4).
+        """
         payment = MockPayment(
             status=PaymentStatus.PRE_AUTH,
             amount_paid=Decimal("30.00"),
@@ -460,7 +467,9 @@ class TestLockReleased:
             PaymentUpdate(payment_event=PaymentEvent.LOCK_RELEASED),
         )
 
-        assert payment.status == PaymentStatus.REFUNDED
+        assert payment.status == PaymentStatus.PARTIAL
+        assert payment.amount_paid == Decimal("30.00")
+        assert payment.amount_refunded == Decimal("0")
         assert payment.amount_locked == Decimal("0.00")
 
     def test_lock_released_from_refunded_raises(self) -> None:
