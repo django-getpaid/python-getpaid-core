@@ -139,3 +139,64 @@ def test_normalized_outcomes_cannot_claim_unreserved_money(state, amount):
         plan_outcome(
             facts, operation, OperationOutcome(state, settled_amount=amount)
         )
+
+
+@pytest.mark.parametrize(
+    "late_state, late_amount, conflicting",
+    [
+        (OperationState.PROVIDER_PENDING, None, False),
+        (OperationState.UNKNOWN, None, False),
+        (OperationState.REJECTED, None, True),
+        (OperationState.SUCCEEDED, Decimal("30"), True),
+    ],
+)
+def test_late_evidence_preserves_terminal_money_and_flags_contradictions(
+    late_state, late_amount, conflicting
+):
+    facts = authorized_facts()
+    operation = plan_reservation(
+        facts, (), charge_intent(amount=Decimal("40"))
+    ).operation
+    completed = plan_outcome(
+        facts,
+        operation,
+        OperationOutcome(
+            OperationState.SUCCEEDED, settled_amount=Decimal("20")
+        ),
+    )
+    late = plan_outcome(
+        completed.facts,
+        completed.operation,
+        OperationOutcome(
+            late_state, settled_amount=late_amount, correlation="capture-1"
+        ),
+    )
+    assert late.operation.state is OperationState.SUCCEEDED
+    assert late.operation.correlation == "capture-1"
+    assert late.facts.captured_funds == Decimal("20")
+    assert late.facts.reconciliation_required is conflicting
+    assert late.operation.reconciliation_required is conflicting
+
+
+def test_conflicting_correlation_never_settles_another_provider_operation():
+    facts = authorized_facts()
+    operation = plan_reservation(
+        facts, (), charge_intent(amount=Decimal("40"))
+    ).operation
+    pending = plan_outcome(
+        facts,
+        operation,
+        OperationOutcome(
+            OperationState.PROVIDER_PENDING, correlation="capture-1"
+        ),
+    )
+    conflict = plan_outcome(
+        pending.facts,
+        pending.operation,
+        OperationOutcome(OperationState.SUCCEEDED, correlation="capture-2"),
+    )
+    assert conflict.operation.correlation == "capture-1"
+    assert conflict.operation.state is OperationState.PROVIDER_PENDING
+    assert conflict.facts.captured_funds == Decimal("0")
+    assert conflict.operation.reconciliation_required
+    assert conflict.facts.reconciliation_required

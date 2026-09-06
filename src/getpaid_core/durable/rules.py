@@ -473,29 +473,51 @@ def plan_outcome(
     if outcome.state is OperationState.SUCCEEDED:
         _settlement_update(operation, outcome)
     current = operation.state
-    if current in TERMINAL_OPERATION_STATES:
-        if outcome.state is not current:
-            raise InvalidTransitionError(
-                f"Operation {operation.operation_id!r} is already "
-                f"{current.value!r} and cannot become "
-                f"{outcome.state.value!r}."
+    settled = (
+        operation.resolved_amount
+        if outcome.settled_amount is None
+        else outcome.settled_amount
+    )
+    conflicting_correlation = (
+        operation.correlation is not None
+        and outcome.correlation is not None
+        and operation.correlation != outcome.correlation
+    )
+    contradictory_terminal = (
+        current in TERMINAL_OPERATION_STATES
+        and outcome.state in TERMINAL_OPERATION_STATES
+        and (
+            current is not outcome.state
+            or (
+                current is OperationState.SUCCEEDED
+                and settled != operation.settled_amount
             )
-        return OutcomePlan(operation=operation, facts=facts)
+        )
+    )
+    reconciliation = (
+        operation.reconciliation_required
+        or outcome.reconciliation_required
+        or conflicting_correlation
+        or contradictory_terminal
+    )
+    recorded = replace(
+        operation,
+        correlation=operation.correlation or outcome.correlation,
+        reconciliation_required=reconciliation,
+    )
+    facts = replace(
+        facts,
+        reconciliation_required=facts.reconciliation_required or reconciliation,
+    )
+    if current in TERMINAL_OPERATION_STATES or conflicting_correlation:
+        return OutcomePlan(operation=recorded, facts=facts)
 
-    settled_facts = facts
     if outcome.state is OperationState.SUCCEEDED:
         update = _settlement_update(operation, outcome)
-        settled_facts = _apply_to_facts(facts, update)
+        facts = _apply_to_facts(facts, update)
+        recorded = replace(recorded, settled_amount=settled)
 
     return OutcomePlan(
-        operation=replace(
-            operation,
-            state=outcome.state,
-            correlation=outcome.correlation or operation.correlation,
-            reconciliation_required=(
-                operation.reconciliation_required
-                or outcome.reconciliation_required
-            ),
-        ),
-        facts=settled_facts,
+        operation=replace(recorded, state=outcome.state),
+        facts=facts,
     )

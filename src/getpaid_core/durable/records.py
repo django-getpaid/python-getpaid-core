@@ -392,6 +392,7 @@ class OperationRecord:
     submission_attempts: int = 0
     retry_until: datetime | None = None
     idempotency_scope: str | None = None
+    settled_amount: Decimal | None = None
     correlation: str | None = None
     reconciliation_required: bool = False
 
