@@ -16,6 +16,7 @@ from getpaid_core.durable import plan_reservation
 from getpaid_core.enums import PaymentStatus
 from getpaid_core.exceptions import InvalidTransitionError
 from getpaid_core.exceptions import OperationConflictError
+from getpaid_core.exceptions import ReconciliationBlockedError
 
 
 def authorized_facts(**overrides) -> PaymentFacts:
@@ -81,6 +82,47 @@ def test_an_outstanding_operation_blocks_an_unrelated_command():
         plan_reservation(
             authorized_facts(), (reserved,), charge_intent("op-2")
         )
+
+
+def test_a_payment_awaiting_reconciliation_refuses_a_new_command():
+    blocked = authorized_facts(reconciliation_required=True)
+
+    with pytest.raises(ReconciliationBlockedError, match="reconciliation"):
+        plan_reservation(blocked, (), charge_intent())
+
+
+def test_reconciliation_blocking_is_a_conflict_with_its_own_remedy():
+    """Callers catching the conflict keep working; waiting will not help."""
+    blocked = authorized_facts(reconciliation_required=True)
+
+    with pytest.raises(OperationConflictError) as excinfo:
+        plan_reservation(blocked, (), charge_intent())
+
+    assert isinstance(excinfo.value, ReconciliationBlockedError)
+    assert excinfo.value.context["payment_id"] == "pay-1"
+
+
+def test_an_outstanding_operation_still_resumes_while_blocked():
+    """Blocking new commands must not strand work already reserved."""
+    reserved = plan_reservation(authorized_facts(), (), charge_intent()).operation
+    blocked = authorized_facts(reconciliation_required=True)
+
+    plan = plan_reservation(blocked, (reserved,), charge_intent())
+
+    assert plan.created is False
+    assert plan.operation is reserved
+
+
+def test_an_outstanding_operation_still_resolves_while_blocked():
+    reserved = plan_reservation(authorized_facts(), (), charge_intent()).operation
+    blocked = authorized_facts(reconciliation_required=True)
+
+    plan = plan_outcome(
+        blocked, reserved, OperationOutcome(state=OperationState.SUCCEEDED)
+    )
+
+    assert plan.operation.state is OperationState.SUCCEEDED
+    assert plan.facts.captured_funds == Decimal("100.00")
 
 
 def test_refund_cancellation_may_target_an_outstanding_refund():

@@ -28,7 +28,42 @@
   totals alone are not a cancellation, and `NEW`, `PREPARED`, `IN_CHARGE` and
   `FAILED` survive the projection.
 
-See `docs/adr/0001-durable-money-operations.md`, sections 4 and 5.
+- **Replay evidence left `provider_data`**: trusted replay bookkeeping is
+  now a core-owned `ReplayRecord` in dedicated storage, committed
+  atomically with the financial facts it applies. Provider metadata can no
+  longer seed, replace or erase it, so a payload carrying an
+  `applied_event_ids` key cannot suppress a genuine capture. Legacy
+  lookalike keys survive as ordinary readable metadata and are never
+  consulted. `ReplayRecord.for_observation()` now takes the payment's
+  `PaymentFacts` rather than a payment id, and `PaymentFacts` gained a
+  `backend` field: an event identity is scoped to `(payment, backend,
+  identity)`, read from stored facts rather than from the payload.
+- **Malformed metadata is refused atomically**: a non-mapping
+  `provider_data`, a non-string metadata key or a non-string event
+  identity raises `InvalidTransitionError` before anything is planned, so
+  committed funds and committed history both survive the rejection.
+- **A payment awaiting reconciliation refuses new commands**: reserving an
+  operation against facts carrying `reconciliation_required` raises the
+  new `ReconciliationBlockedError` (a subclass of
+  `OperationConflictError`). Operations already reserved still resume and
+  still resolve, and observations are unaffected — callbacks and
+  reconciliation continue while commands are blocked.
+
+### Added
+
+- **`getpaid_core.durable.migration`**: a framework-neutral contract for
+  reading released 3.x payment records into durable facts.
+  `plan_migration(LegacyPaymentState)` preserves legacy amounts, status
+  and metadata, produces neither replay evidence nor operation records —
+  provider-controlled history is not promoted and operation IDs are not
+  invented — and reports `MigrationFinding`s. Ambiguous records and
+  records left mid-operation migrate readable but mutation-blocked.
+- **Three further adapter conformance checks**: metadata cannot forge or
+  erase replay history, malformed metadata is rejected atomically, and a
+  payment awaiting reconciliation refuses new commands.
+
+See `docs/adr/0001-durable-money-operations.md`, sections 4, 5 and 6, and
+`docs/durable-storage.md` for the migration, cutover and retention rules.
 
 ## v3.2.0 (2026-07-04)
 

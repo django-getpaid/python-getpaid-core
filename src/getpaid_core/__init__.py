@@ -19,6 +19,7 @@ from getpaid_core.exceptions import InvalidCallbackError
 from getpaid_core.exceptions import InvalidTransitionError
 from getpaid_core.exceptions import LockFailure
 from getpaid_core.exceptions import OperationConflictError
+from getpaid_core.exceptions import ReconciliationBlockedError
 from getpaid_core.exceptions import ReconciliationRequiredError
 from getpaid_core.exceptions import RefundFailure
 from getpaid_core.exceptions import StateConflictError
@@ -56,6 +57,7 @@ __all__ = [
     "PaymentStatus",
     "PaymentUpdate",
     "PluginRegistry",
+    "ReconciliationBlockedError",
     "ReconciliationRequiredError",
     "RefundFailure",
     "RefundResult",

@@ -34,7 +34,7 @@ def capture_observation(amount: str, event_identity: str) -> PaymentUpdate:
 
 
 def replay_for(update: PaymentUpdate) -> tuple[ReplayRecord, ...]:
-    return (ReplayRecord.for_observation("pay-1", update),)
+    return (ReplayRecord.for_observation(prepared_facts(), update),)
 
 
 def test_capture_observation_commits_facts_and_replay_record():

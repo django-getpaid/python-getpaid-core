@@ -27,9 +27,12 @@ from getpaid_core.durable.records import OutcomePlan
 from getpaid_core.durable.records import PaymentFacts
 from getpaid_core.durable.records import ReplayRecord
 from getpaid_core.durable.records import ReservationPlan
+from getpaid_core.durable.records import validate_event_identity
+from getpaid_core.durable.records import validate_provider_metadata
 from getpaid_core.enums import PaymentEvent
 from getpaid_core.exceptions import InvalidTransitionError
 from getpaid_core.exceptions import OperationConflictError
+from getpaid_core.exceptions import ReconciliationBlockedError
 from getpaid_core.fsm import apply_payment_update
 from getpaid_core.fsm import capturable_amount
 from getpaid_core.fsm import refundable_amount
@@ -50,12 +53,16 @@ class _FactsPayment:
     back. Nothing the caller owns is touched.
 
     It carries the fields the state engine reads, which is a subset of the
-    ``Payment`` protocol: the order, currency, backend and description of
-    a payment are not financial facts and no transition consults them.
+    ``Payment`` protocol: the order, currency and description of a payment
+    are not financial facts and no transition consults them. The context
+    the engine does not read -- the payment identity, its backend and its
+    reconciliation requirement -- is carried through unchanged so that
+    applying an observation cannot quietly drop it.
     """
 
     def __init__(self, facts: PaymentFacts) -> None:
         self.id = facts.payment_id
+        self.backend = facts.backend
         self.amount_required = facts.amount_required
         self.amount_paid = facts.captured_funds
         self.amount_refunded = facts.refunded_funds
@@ -72,6 +79,7 @@ class _FactsPayment:
         return PaymentFacts(
             payment_id=self._payment_id,
             amount_required=self.amount_required,
+            backend=self.backend,
             captured_funds=self.amount_paid,
             refunded_funds=self.amount_refunded,
             remaining_authorization=self.amount_locked,
@@ -113,17 +121,24 @@ def plan_observation(
     reconciliation rather than silently suppressing a financial change.
 
     Raises ``InvalidTransitionError`` for evidence that cannot be applied
-    to the current state: an impossible transition stays an error rather
-    than a blanket ignored exception.
+    to the current state, and for malformed metadata or a malformed event
+    identity: an impossible transition stays an error rather than a
+    blanket ignored exception, and rejecting before anything is planned
+    is what leaves committed funds and committed history untouched.
     """
     if update is None:
         return ObservationPlan(facts=facts, replay_record=None, applied=False)
 
+    validate_provider_metadata(
+        update.provider_data, name="Observation metadata"
+    )
+    identity = validate_event_identity(update.provider_event_id)
+
     record: ReplayRecord | None = None
-    if update.provider_event_id:
-        record = ReplayRecord.for_observation(facts.payment_id, update)
+    if identity is not None:
+        record = ReplayRecord.for_observation(facts, update)
         for known in replay_log:
-            if known.event_identity != record.event_identity:
+            if known.scoped_identity != record.scoped_identity:
                 continue
             if known.content_digest == record.content_digest:
                 return ObservationPlan(
@@ -241,6 +256,14 @@ def plan_reservation(
     parameters, or an unrelated command while another mutation is
     outstanding, raises ``OperationConflictError``.
 
+    A payment carrying a reconciliation requirement takes no *new*
+    command at all: an ambiguous migrated record, a legacy operation that
+    was already pending, or contradictory evidence must be settled by the
+    application before more money moves. Already-reserved operations
+    still resume and still resolve, so blocking never strands work that
+    is already outstanding, and observations are unaffected -- callbacks
+    and reconciliation continue while commands are blocked.
+
     Reserving is not provider acceptance and not settlement: it records
     what was resolved and who holds the payment.
     """
@@ -258,6 +281,17 @@ def plan_reservation(
                 context={"operation_id": intent.operation_id},
             )
         return ReservationPlan(operation=record, created=False)
+
+    if facts.reconciliation_required:
+        raise ReconciliationBlockedError(
+            f"Payment {facts.payment_id!r} requires reconciliation; "
+            f"{intent.operation_id!r} cannot be reserved until the "
+            "application has resolved it.",
+            context={
+                "payment_id": facts.payment_id,
+                "operation_id": intent.operation_id,
+            },
+        )
 
     if intent.operation_type is OperationType.CANCEL_REFUND:
         _require_cancellation_target(operations, intent)

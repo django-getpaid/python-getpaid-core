@@ -70,6 +70,9 @@ def test_the_suite_has_checks_for_every_required_race():
         "unresolved_operations_are_discoverable",
         "reconciliation_flags_are_enumerable",
         "outstanding_operation_blocks_unrelated_commands",
+        "metadata_cannot_forge_replay_history",
+        "malformed_metadata_is_rejected_atomically",
+        "reconciliation_blocks_new_commands",
     }
 
 

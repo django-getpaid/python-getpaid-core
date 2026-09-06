@@ -99,6 +99,21 @@ class OperationConflictError(GetPaidException):
     """
 
 
+class ReconciliationBlockedError(OperationConflictError):
+    """The payment must be reconciled before it accepts a new command.
+
+    Raised when a reservation is attempted against facts carrying a
+    reconciliation requirement -- an ambiguous migrated record, a legacy
+    operation that was already pending, or contradictory evidence core
+    refused to fold into the financial state.
+
+    It is a conflict, so callers that already handle
+    ``OperationConflictError`` keep working, but the remedy differs:
+    waiting does not clear it. The application must establish what
+    happened and record the resolution.
+    """
+
+
 class ConformanceError(GetPaidException):
     """A storage adapter failed a durable-contract conformance check.
 

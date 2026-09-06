@@ -31,6 +31,57 @@ def _freeze(mapping: Mapping[str, Any] | None) -> Mapping[str, Any]:
     return _EMPTY if not mapping else MappingProxyType(dict(mapping))
 
 
+#: Metadata keys the released 3.x contract used for core-owned replay
+#: bookkeeping, when history and provider metadata still shared one
+#: mapping. They survive as ordinary provider metadata -- readable, and
+#: preserved by migration -- but nothing here or in
+#: :mod:`getpaid_core.durable.rules` ever reads them as trusted evidence.
+LEGACY_REPLAY_METADATA_KEYS: frozenset[str] = frozenset({"applied_event_ids"})
+
+
+def validate_provider_metadata(
+    metadata: Any, *, name: str = "Provider metadata"
+) -> None:
+    """Reject metadata core cannot store as a serializable mapping.
+
+    This is a shape check, not an ownership check: a payload carrying a
+    :data:`LEGACY_REPLAY_METADATA_KEYS` lookalike is accepted and kept as
+    plain metadata. Refusing it instead would let any provider payload
+    suppress a genuine financial change -- the very failure dedicated
+    replay storage exists to prevent.
+
+    Raising before anything is planned is what makes rejection atomic:
+    the adapter's boundary commits nothing, so committed funds and
+    committed replay evidence both survive a malformed payload.
+    """
+    if not isinstance(metadata, Mapping):
+        raise InvalidTransitionError(
+            f"{name} must be a mapping, not {type(metadata).__name__}."
+        )
+    for key in metadata:
+        if not isinstance(key, str):
+            raise InvalidTransitionError(
+                f"{name} keys must be strings; got {type(key).__name__}."
+            )
+
+
+def validate_event_identity(value: Any) -> str | None:
+    """Return an observation's provider event identity, if it carries one.
+
+    An absent or empty identity is not an error -- an observation without
+    one simply commits no replay evidence -- but a non-string identity is
+    malformed and is refused before any state is planned.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise InvalidTransitionError(
+            "A provider event identity must be a string, not "
+            f"{type(value).__name__}."
+        )
+    return value or None
+
+
 def _canonical_amount(amount: Decimal | None) -> str:
     """Render an amount so ``100`` and ``100.00`` compare as one value."""
     if amount is None:
@@ -104,11 +155,23 @@ class PaymentFacts:
     ``reconciliation_required`` is recorded independently of the money:
     evidence that could not be applied consistently is discoverable from
     stored state rather than from an exception, a log line or whatever
-    object happened to be in the caller's hands.
+    object happened to be in the caller's hands. While it stands, no new
+    operation may be reserved against the payment.
+
+    ``backend`` names the provider the payment moves money through. It is
+    not a financial fact; it is the context a provider event identity is
+    unique within, and it is read from stored facts rather than from a
+    caller's object.
+
+    ``provider_data`` is unrestricted plugin metadata. It holds no
+    core-owned bookkeeping: replay evidence is a separate
+    :class:`ReplayRecord`, so nothing a processor writes here can seed,
+    replace or erase trusted history.
     """
 
     payment_id: str
     amount_required: Decimal
+    backend: str = ""
     captured_funds: Decimal = Decimal("0")
     refunded_funds: Decimal = Decimal("0")
     remaining_authorization: Decimal = Decimal("0")
@@ -120,6 +183,9 @@ class PaymentFacts:
     provider_data: Mapping[str, Any] = field(default=_EMPTY)
 
     def __post_init__(self) -> None:
+        validate_provider_metadata(
+            self.provider_data, name="Payment metadata"
+        )
         object.__setattr__(self, "provider_data", _freeze(self.provider_data))
 
 
@@ -129,26 +195,45 @@ class ReplayRecord:
 
     Replay evidence is core-owned and lives outside the unrestricted
     ``provider_data`` mapping, so processor metadata can neither seed nor
-    erase it. Identity is scoped to its payment, and reuse is detected by
-    normalized semantic content rather than raw-payload byte equality.
+    erase it. Identity is scoped to the provider/payment context it
+    arrived in, and reuse is detected by normalized semantic content
+    rather than raw-payload byte equality.
     """
 
     payment_id: str
+    backend: str
     event_identity: str
     content_digest: str
 
+    @property
+    def scoped_identity(self) -> tuple[str, str, str]:
+        """The context a provider event identity is unique within.
+
+        Two observations are the *same* event only within one payment at
+        one provider. An identity a different backend issued is a
+        different event, however it is spelled.
+        """
+        return (self.payment_id, self.backend, self.event_identity)
+
     @classmethod
     def for_observation(
-        cls, payment_id: str, update: PaymentUpdate
+        cls, facts: "PaymentFacts", update: PaymentUpdate
     ) -> "ReplayRecord":
-        """Build the record a given observation would commit."""
-        if not update.provider_event_id:
+        """Build the record a given observation would commit.
+
+        The scope comes from the payment's *stored* facts, never from the
+        observation: a payload cannot nominate the context its identity
+        is compared in.
+        """
+        identity = validate_event_identity(update.provider_event_id)
+        if identity is None:
             raise InvalidTransitionError(
                 "A replay record requires a provider event identity."
             )
         return cls(
-            payment_id=payment_id,
-            event_identity=update.provider_event_id,
+            payment_id=facts.payment_id,
+            backend=facts.backend,
+            event_identity=identity,
             content_digest=observation_digest(update),
         )
 
