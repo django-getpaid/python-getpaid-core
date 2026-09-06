@@ -435,6 +435,15 @@ def plan_observation(
             facts = _retain_observation(facts, update, "ambiguous_cancellation")
         if not scoped_release or facts.remaining_authorization == 0:
             aggregate = replace(aggregate, payment_event=None)
+    if (
+        facts.external_id is not None
+        and aggregate.external_id is not None
+        and aggregate.external_id != facts.external_id
+    ):
+        # Compare with committed identity before any envelope can replace it;
+        # correlated outcome validation must see that same trusted baseline.
+        facts = _retain_observation(facts, update, "conflicting_external_id")
+        aggregate = replace(aggregate, external_id=None)
     result = _apply_to_facts(facts, aggregate)
     if isinstance(update, PaymentObservation) and update.outcome is not None:
         candidates = [

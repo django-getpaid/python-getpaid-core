@@ -6,7 +6,12 @@ from decimal import Decimal
 import pytest
 
 from getpaid_core.durable import InMemoryDurableRepository
+from getpaid_core.durable import OperationIntent
+from getpaid_core.durable import OperationOutcome
+from getpaid_core.durable import OperationState
+from getpaid_core.durable import OperationType
 from getpaid_core.durable import PaymentFacts
+from getpaid_core.durable import PaymentObservation
 from getpaid_core.enums import PaymentEvent
 from getpaid_core.enums import PaymentStatus
 from getpaid_core.types import PaymentUpdate
@@ -101,3 +106,32 @@ async def test_historical_capture_with_hold_does_not_become_a_dispute(identity):
     assert plan.facts == before
     assert not plan.facts.reconciliation_required
     assert plan.applied is (identity != "original")
+
+
+async def test_envelope_cannot_overwrite_established_operation_identity():
+    repository = InMemoryDurableRepository(
+        [PaymentFacts("payment", Decimal("100"))]
+    )
+    await repository.reserve_operation(
+        "payment", OperationIntent("prepare", OperationType.PREPARE)
+    )
+    await repository.record_operation_outcome(
+        "payment",
+        "prepare",
+        OperationOutcome(OperationState.SUCCEEDED, external_id="old"),
+    )
+    plan = await repository.apply_observation(
+        "payment",
+        PaymentObservation(
+            external_id="new",
+            operation_id="prepare",
+            outcome=OperationOutcome(
+                OperationState.SUCCEEDED, external_id="new"
+            ),
+        ),
+    )
+    assert plan.facts.external_id == "old"
+    assert plan.facts.reconciliation_required
+    assert plan.facts.observation_conflicts
+    assert plan.operations[0].conflicting_outcomes
+    assert plan.operations[0].state == OperationState.SUCCEEDED
