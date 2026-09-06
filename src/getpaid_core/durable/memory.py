@@ -145,15 +145,7 @@ class InMemoryDurableRepository:
                 operations=operations,
                 response_attempt=response_attempt,
             )
-            replacements = {
-                record.operation_id: record
-                for record in (plan.operation, *plan.related_operations)
-            }
-            self._operations[payment_id] = [
-                replacements.get(record.operation_id, record)
-                for record in operations
-            ]
-            self._facts[payment_id] = plan.facts
+            self._commit_outcome(payment_id, plan)
             return plan
 
     async def record_operation_failure(
@@ -186,16 +178,20 @@ class InMemoryDurableRepository:
                 expected_facts=expected_facts,
                 operations=operations,
             )
-            replacements = {
-                entry.operation_id: entry
-                for entry in (plan.operation, *plan.related_operations)
-            }
-            self._operations[payment_id] = [
-                replacements.get(entry.operation_id, entry)
-                for entry in operations
-            ]
-            self._facts[payment_id] = plan.facts
+            self._commit_outcome(payment_id, plan)
             return plan
+
+    def _commit_outcome(self, payment_id: str, plan: OutcomePlan) -> None:
+        """Commit a validated plan while the caller holds the payment lock."""
+        replacements = {
+            record.operation_id: record
+            for record in (plan.operation, *plan.related_operations)
+        }
+        self._operations[payment_id] = [
+            replacements.get(record.operation_id, record)
+            for record in self._operations.get(payment_id, ())
+        ]
+        self._facts[payment_id] = plan.facts
 
     async def get_operation(
         self, payment_id: str, operation_id: str
