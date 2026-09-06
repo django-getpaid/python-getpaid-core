@@ -372,10 +372,12 @@ class OperationIntent:
 class OperationRecord:
     """The durable reservation and current state of one operation intent.
 
-    ``starting_captured``/``starting_refunded`` freeze the totals the
-    reservation resolved against, so a settlement is derived from the
-    reserved intent rather than from whatever the payment looks like when
-    the response arrives.
+    Starting totals and recursively frozen ``parameters`` describe the
+    reserved request, not the payment at response time. ``idempotency_key``
+    derives from the backend/payment/operation identity, independent of
+    attempt count. Submission time, scope and retry deadline are frozen by
+    the first claim. ``settled_amount`` retains confirmed operation-specific
+    money for detecting contradictory terminal evidence.
     """
 
     payment_id: str
@@ -425,6 +427,9 @@ class OperationOutcome:
 
     ``correlation`` is the safe provider handle for the operation, kept
     per operation rather than overwriting a single payment-wide id.
+    ``external_id`` is the optional payment handle established by prepare.
+    ``SUCCEEDED`` confirms the operation-specific effect, not acceptance;
+    omitted ``settled_amount`` then confirms the full reserved amount.
     """
 
     state: OperationState
@@ -465,7 +470,9 @@ class ReservationPlan:
 
     ``created`` is false when the same operation identity and parameters
     were already reserved: the caller resumes that reservation instead of
-    starting a second one.
+    starting a second one. Commit ``facts`` with the operation when present:
+    a reserved refund immediately projects refund-in-progress without
+    changing financial totals.
     """
 
     operation: OperationRecord
@@ -486,7 +493,9 @@ class OutcomePlan:
     """What an adapter must commit when an operation resolves.
 
     The operation record and the financial facts it settles commit
-    together, so terminal evidence and its money never diverge.
+    together, so terminal evidence and its money never diverge. Every
+    ``related_operations`` entry also commits atomically: a successful
+    cancellation resolves its still-unresolved target refund.
     """
 
     operation: OperationRecord

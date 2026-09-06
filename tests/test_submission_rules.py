@@ -18,9 +18,11 @@ from getpaid_core.durable.records import OperationType
 from getpaid_core.durable.records import PaymentFacts
 from getpaid_core.durable.rules import plan_outcome
 from getpaid_core.durable.rules import plan_reservation
+from getpaid_core.durable.rules import plan_submission
 from getpaid_core.enums import PaymentStatus
 from getpaid_core.exceptions import InvalidTransitionError
 from getpaid_core.exceptions import OperationConflictError
+from getpaid_core.exceptions import ReconciliationBlockedError
 
 
 def authorized_facts(**overrides):
@@ -393,3 +395,122 @@ def test_release_response_after_callback_preserves_confirmed_release():
     )
     assert response.operation.state is OperationState.SUCCEEDED
     assert response.facts == callback_facts
+
+
+@pytest.mark.parametrize(
+    "parameters",
+    [
+        {"value": object()},
+        {"value": {"set"}},
+        {1: "not-a-string-key"},
+        {"value": Decimal("NaN")},
+        {"value": Decimal("Infinity")},
+        {"value": float("inf")},
+        {"value": float("nan")},
+        {"nested": [{"value": b"bytes"}]},
+        None,
+    ],
+)
+def test_unsupported_parameters_are_rejected_before_reservation(parameters):
+    with pytest.raises(InvalidTransitionError):
+        charge_intent(parameters=parameters)
+
+
+@pytest.mark.parametrize("operation_id", ["", " ", None, 1, False])
+def test_operation_identity_requires_a_nonempty_string(operation_id):
+    with pytest.raises(InvalidTransitionError):
+        charge_intent(operation_id=operation_id)
+
+
+def test_cyclic_parameters_are_rejected_without_retaining_aliases():
+    cyclic = {}
+    cyclic["self"] = cyclic
+    with pytest.raises(InvalidTransitionError):
+        charge_intent(parameters=cyclic)
+
+
+@pytest.mark.parametrize(
+    "first, second",
+    [
+        (True, 1),
+        (1, 1.0),
+        (1, Decimal("1")),
+        ("1", Decimal("1")),
+        ([1, 2], [2, 1]),
+        (None, "None"),
+    ],
+)
+def test_changed_parameter_type_or_sequence_order_conflicts(first, second):
+    operation = plan_reservation(
+        authorized_facts(), (), charge_intent(parameters={"value": first})
+    ).operation
+    with pytest.raises(OperationConflictError):
+        plan_reservation(
+            authorized_facts(),
+            (operation,),
+            charge_intent(parameters={"value": second}),
+        )
+
+
+def test_idempotency_keys_are_scoped_without_delimiter_collisions():
+    record = plan_reservation(authorized_facts(), (), charge_intent()).operation
+    keys = {
+        record.idempotency_key,
+        replace(record, backend="other").idempotency_key,
+        replace(record, payment_id="other").idempotency_key,
+        replace(record, operation_id="other").idempotency_key,
+        replace(record, backend="a", payment_id="b\u001fc").idempotency_key,
+        replace(record, backend="a\u001fb", payment_id="c").idempotency_key,
+    }
+    assert len(keys) == 6
+
+
+@pytest.mark.parametrize("state", list(OperationState))
+def test_submission_claims_obey_state_and_initial_attempt(state):
+    facts = authorized_facts()
+    reserved = plan_reservation(facts, (), charge_intent()).operation
+    now = datetime(2026, 9, 6, tzinfo=UTC)
+    window = now + timedelta(hours=1)
+    initial = plan_submission(
+        facts,
+        replace(reserved, state=state),
+        expected_attempt=0,
+        now=now,
+        retry_until=window,
+    )
+    assert initial.granted is (state is OperationState.RESERVED)
+    previous = replace(
+        reserved,
+        state=state,
+        submission_attempts=1,
+        submitted_at=now,
+        retry_until=window,
+    )
+    replay = plan_submission(facts, previous, expected_attempt=1, now=now)
+    assert replay.granted is (
+        state in {OperationState.UNKNOWN, OperationState.SUBMITTING}
+    )
+    assert not plan_submission(
+        facts, previous, expected_attempt=0, now=now
+    ).granted
+    assert not plan_submission(
+        facts, replace(previous, retry_until=None), expected_attempt=1, now=now
+    ).granted
+
+
+def test_reconciliation_blocks_dispatch_but_not_recording_evidence():
+    facts = authorized_facts()
+    operation = plan_reservation(facts, (), charge_intent()).operation
+    facts = replace(facts, reconciliation_required=True)
+    with pytest.raises(ReconciliationBlockedError):
+        plan_submission(
+            facts,
+            operation,
+            expected_attempt=0,
+            now=datetime(2026, 9, 6, tzinfo=UTC),
+        )
+    settled = plan_outcome(
+        facts, operation, OperationOutcome(OperationState.SUCCEEDED)
+    )
+    assert settled.facts.captured_funds == Decimal("100")
+    assert settled.facts.reconciliation_required

@@ -53,7 +53,9 @@ class DurablePaymentRepository(Protocol):
         Returns the committed reservation. A repeat of the same operation
         ID with the same parameters returns the existing reservation
         rather than creating a second one; a conflicting intent raises
-        ``OperationConflictError``.
+        ``OperationConflictError``. Commit the reservation plan's facts
+        alongside its operation: reserving a refund projects its unresolved
+        status, without moving funds.
         """
         ...
 
@@ -93,7 +95,9 @@ class DurablePaymentRepository(Protocol):
         """Record an operation outcome and its financial effects.
 
         Returns the committed operation record together with the facts it
-        settled; the two commit atomically.
+        settled and any related operations; all commit atomically. Load
+        the payment's operations for ``plan_outcome`` so a cancellation can
+        resolve its target and refund status reflects outstanding work.
         """
         ...
 

@@ -469,7 +469,11 @@ def plan_outcome(
     The operation record and the financial facts it settles are returned
     together so the adapter commits them in one boundary. A nonterminal
     outcome -- including ``UNKNOWN`` -- moves no money and leaves the
-    operation discoverable as unresolved work.
+    operation discoverable as unresolved work. Late nonterminal evidence
+    cannot downgrade a terminal operation; contradictory terminal evidence
+    or correlation flags reconciliation without overwriting established
+    facts. Load ``operations`` in the same boundary: cancellation success
+    requires its target and returns it through ``related_operations``.
     """
     operations = tuple(operations)
     for name in ("correlation", "external_id"):
@@ -581,9 +585,7 @@ def plan_outcome(
         elif (
             operation.operation_type is OperationType.RELEASE_LOCK
             and facts.remaining_authorization == 0
-        ):
-            update = replace(update, payment_event=None)
-        elif (
+        ) or (
             operation.operation_type is OperationType.PREPARE
             and facts.status != PaymentStatus.NEW
         ):
