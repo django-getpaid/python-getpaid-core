@@ -20,6 +20,7 @@ from getpaid_core._amounts import validate_payment_amounts
 from getpaid_core.durable.records import CANCELLATION_CORRELATION
 from getpaid_core.durable.records import CANCELLATION_TARGET
 from getpaid_core.durable.records import TERMINAL_OPERATION_STATES
+from getpaid_core.durable.records import ObservationConflict
 from getpaid_core.durable.records import ObservationPlan
 from getpaid_core.durable.records import OperationIntent
 from getpaid_core.durable.records import OperationOutcome
@@ -32,6 +33,7 @@ from getpaid_core.durable.records import PaymentObservation
 from getpaid_core.durable.records import ReplayRecord
 from getpaid_core.durable.records import ReservationPlan
 from getpaid_core.durable.records import SubmissionPlan
+from getpaid_core.durable.records import observation_content
 from getpaid_core.durable.records import validate_event_identity
 from getpaid_core.durable.records import validate_provider_metadata
 from getpaid_core.enums import PaymentEvent
@@ -81,6 +83,7 @@ class _FactsPayment:
         self.provider_data: dict[str, Any] = dict(facts.provider_data)
         self._payment_id = facts.payment_id
         self._reconciliation_required = facts.reconciliation_required
+        self._observation_conflicts = facts.observation_conflicts
 
     def to_facts(self) -> PaymentFacts:
         return PaymentFacts(
@@ -96,6 +99,7 @@ class _FactsPayment:
             fraud_message=self.fraud_message,
             reconciliation_required=self._reconciliation_required,
             provider_data=self.provider_data,
+            observation_conflicts=self._observation_conflicts,
         )
 
 
@@ -107,8 +111,36 @@ def _apply_to_facts(facts: PaymentFacts, update: PaymentUpdate) -> PaymentFacts:
     the provider metadata mapping.
     """
     view = _FactsPayment(facts)
+    event = update.payment_event
+    # Financial fields are independent cumulative claims, not payloads owned
+    # exclusively by the event label. Apply capture before refund so a single
+    # snapshot can establish both, then process other valid information.
+    for financial_update in (
+        PaymentUpdate(
+            payment_event=PaymentEvent.PAYMENT_CAPTURED,
+            paid_amount=update.paid_amount,
+        ),
+        PaymentUpdate(
+            payment_event=PaymentEvent.REFUND_CONFIRMED,
+            refunded_amount=update.refunded_amount,
+        ),
+    ):
+        if (
+            financial_update.paid_amount is not None
+            or financial_update.refunded_amount is not None
+        ):
+            apply_payment_update(cast("Payment", view), financial_update)
+            if event is financial_update.payment_event:
+                event = None
     apply_payment_update(
-        cast("Payment", view), replace(update, provider_event_id=None)
+        cast("Payment", view),
+        replace(
+            update,
+            provider_event_id=None,
+            payment_event=event,
+            paid_amount=None,
+            refunded_amount=None,
+        ),
     )
     result = view.to_facts()
     if result.captured_funds > facts.captured_funds and (
@@ -116,6 +148,45 @@ def _apply_to_facts(facts: PaymentFacts, update: PaymentUpdate) -> PaymentFacts:
     ):
         result = replace(result, reconciliation_required=True)
     return result
+
+
+def _retain_observation(
+    facts: PaymentFacts, update: PaymentUpdate, reason: str
+) -> PaymentFacts:
+    evidence = ObservationConflict(
+        update.provider_event_id, observation_content(update), reason
+    )
+    conflicts = facts.observation_conflicts
+    if evidence not in conflicts:
+        conflicts = (*conflicts, evidence)
+    return replace(
+        facts, reconciliation_required=True, observation_conflicts=conflicts
+    )
+
+
+def _financial_observation_is_possible(
+    facts: PaymentFacts, update: PaymentUpdate
+) -> bool:
+    amounts = (update.paid_amount, update.refunded_amount, update.locked_amount)
+    for amount in amounts:
+        if amount is not None and (
+            not isinstance(amount, Decimal) or not amount.is_finite()
+        ):
+            raise InvalidTransitionError(
+                "Observation amounts must be finite Decimals."
+            )
+    captured = max(facts.captured_funds, update.paid_amount or Decimal("0"))
+    return (
+        all(amount is None or amount >= 0 for amount in amounts)
+        and captured <= facts.amount_required
+        and (
+            update.refunded_amount is None or update.refunded_amount <= captured
+        )
+        and (
+            update.locked_amount is None
+            or (0 < update.locked_amount <= facts.amount_required - captured)
+        )
+    )
 
 
 def plan_observation(
@@ -147,6 +218,12 @@ def plan_observation(
         update.provider_data, name="Observation metadata"
     )
     identity = validate_event_identity(update.provider_event_id)
+    if not _financial_observation_is_possible(facts, update):
+        return ObservationPlan(
+            facts=_retain_observation(facts, update, "financial_constraints"),
+            replay_record=None,
+            applied=False,
+        )
 
     record: ReplayRecord | None = None
     if identity is not None:
@@ -159,7 +236,9 @@ def plan_observation(
                     facts=facts, replay_record=None, applied=False
                 )
             return ObservationPlan(
-                facts=replace(facts, reconciliation_required=True),
+                facts=_retain_observation(
+                    facts, update, "conflicting_identity"
+                ),
                 replay_record=None,
                 applied=False,
             )

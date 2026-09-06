@@ -139,3 +139,85 @@ async def test_correlated_callback_completes_before_late_acceptance():
         ),
     )
     assert not replay.applied
+
+
+@pytest.mark.parametrize("amount", ["151", "-1"])
+async def test_impossible_money_is_retained_without_changing_facts(amount):
+    repository = InMemoryDurableRepository(
+        [
+            PaymentFacts(
+                "payment",
+                D("150"),
+                captured_funds=D("100"),
+                status=PaymentStatus.PAID,
+            )
+        ]
+    )
+    update = PaymentUpdate(
+        payment_event=PaymentEvent.PAYMENT_CAPTURED,
+        paid_amount=D(amount),
+        provider_event_id="bad",
+        provider_data={"secret": "not retained"},
+    )
+    plan = await repository.apply_observation("payment", update)
+    assert not plan.applied
+    assert plan.facts.captured_funds == D("100")
+    assert plan.facts.reconciliation_required
+    (evidence,) = plan.facts.observation_conflicts
+    assert amount in evidence.semantic_content
+    assert "secret" not in evidence.semantic_content
+    assert "not retained" not in evidence.semantic_content
+    assert plan.replay_record is None
+    again = await repository.apply_observation("payment", update)
+    assert again.facts.observation_conflicts == plan.facts.observation_conflicts
+
+
+async def test_conflicting_identity_retains_both_financial_claims():
+    repository = InMemoryDurableRepository(
+        [PaymentFacts("payment", D("150"), status=PaymentStatus.PREPARED)]
+    )
+    await repository.apply_observation(
+        "payment",
+        PaymentUpdate(
+            payment_event=PaymentEvent.PAYMENT_CAPTURED,
+            paid_amount=D("40"),
+            provider_event_id="same",
+        ),
+    )
+    plan = await repository.apply_observation(
+        "payment",
+        PaymentUpdate(
+            payment_event=PaymentEvent.PAYMENT_CAPTURED,
+            paid_amount=D("100"),
+            provider_event_id="same",
+        ),
+    )
+    assert plan.facts.captured_funds == D("40")
+    assert "100" in plan.facts.observation_conflicts[0].semantic_content
+
+
+async def test_stale_capture_does_not_discard_new_refund_or_metadata():
+    repository = InMemoryDurableRepository(
+        [
+            PaymentFacts(
+                "payment",
+                D("150"),
+                captured_funds=D("100"),
+                refunded_funds=D("20"),
+                status=PaymentStatus.PARTIALLY_REFUNDED,
+            )
+        ]
+    )
+    plan = await repository.apply_observation(
+        "payment",
+        PaymentUpdate(
+            payment_event=PaymentEvent.PAYMENT_CAPTURED,
+            paid_amount=D("80"),
+            refunded_amount=D("30"),
+            external_id="payment-handle",
+        ),
+    )
+    assert plan.facts.captured_funds == D("100")
+    assert plan.facts.refunded_funds == D("30")
+    assert plan.facts.external_id == "payment-handle"
+    assert plan.facts.status == PaymentStatus.PARTIALLY_REFUNDED

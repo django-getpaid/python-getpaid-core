@@ -249,6 +249,7 @@ class PaymentFacts:
     fraud_message: str = ""
     reconciliation_required: bool = False
     provider_data: Mapping[str, Any] = field(default=EMPTY_METADATA)
+    observation_conflicts: tuple["ObservationConflict", ...] = ()
 
     def __post_init__(self) -> None:
         validate_provider_metadata(self.provider_data, name="Payment metadata")
@@ -306,8 +307,8 @@ class ReplayRecord:
         )
 
 
-def observation_digest(update: PaymentUpdate) -> str:
-    """Digest the semantic content of an observation.
+def observation_content(update: PaymentUpdate) -> str:
+    """Serialize allowlisted semantic evidence, excluding provider metadata.
 
     Only core-owned semantic fields take part: the provider payload in
     ``provider_data`` is deliberately excluded, so a retransmission that
@@ -332,7 +333,26 @@ def observation_digest(update: PaymentUpdate) -> str:
             str(outcome.reconciliation_required) if outcome else "",
             (outcome.external_id or "") if outcome else "",
         )
-    return sha256("\x1f".join(parts).encode()).hexdigest()
+    return json.dumps(parts, ensure_ascii=True, separators=(",", ":"))
+
+
+def observation_digest(update: PaymentUpdate) -> str:
+    """Hash normalized semantic content with unambiguous field boundaries."""
+    return sha256(observation_content(update).encode()).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class ObservationConflict:
+    """Compact disputed evidence, separate from financial facts and metadata.
+
+    ``semantic_content`` is JSON containing only core-defined observation
+    fields, not raw provider payloads. Preserve it for investigation; a digest
+    alone cannot recover the financial claim that was refused.
+    """
+
+    event_identity: str | None
+    semantic_content: str
+    reason: str
 
 
 @dataclass(frozen=True, slots=True)
