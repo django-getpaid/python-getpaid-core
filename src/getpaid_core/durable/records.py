@@ -328,6 +328,7 @@ def observation_content(update: PaymentUpdate) -> str:
         parts += (
             update.operation_id or "",
             str(update.cancellation_scope or ""),
+            str(update.delta_only),
             str(outcome.state) if outcome else "",
             _canonical_amount(outcome.settled_amount) if outcome else "",
             (outcome.correlation or "") if outcome else "",
@@ -500,6 +501,7 @@ class PaymentObservation(PaymentUpdate):
     operation_id: str | None = None
     outcome: OperationOutcome | None = None
     cancellation_scope: OperationType | None = None
+    delta_only: bool = False
 
 
 @dataclass(frozen=True, slots=True)

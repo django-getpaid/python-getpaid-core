@@ -279,3 +279,42 @@ async def test_ambiguous_refund_cancellation_cannot_clear_active_refund():
     assert plan.facts.refunded_funds == 0
     assert plan.facts.reconciliation_required
     assert (await repository.get_operation("payment", "refund")).is_active
+
+
+@pytest.mark.parametrize("correlated", [False, True])
+async def test_delta_only_evidence_needs_proven_intent_history(correlated):
+    repository = InMemoryDurableRepository(
+        [
+            PaymentFacts(
+                "payment",
+                D("100"),
+                captured_funds=D("30"),
+                remaining_authorization=D("70"),
+                status=PaymentStatus.PARTIAL,
+            )
+        ]
+    )
+    await repository.reserve_operation(
+        "payment", OperationIntent("charge", OperationType.CHARGE, D("20"))
+    )
+    update = PaymentObservation(
+        payment_event=PaymentEvent.PAYMENT_CAPTURED,
+        paid_amount=D("20"),
+        delta_only=True,
+        operation_id="charge" if correlated else None,
+        outcome=OperationOutcome(
+            OperationState.SUCCEEDED, settled_amount=D("20")
+        )
+        if correlated
+        else None,
+    )
+    for _ in range(2):
+        plan = await repository.apply_observation("payment", update)
+        assert plan.facts.captured_funds == D("50" if correlated else "30")
+        assert plan.facts.reconciliation_required is not correlated
+    operation = await repository.get_operation("payment", "charge")
+    assert operation.state == (
+        OperationState.SUCCEEDED if correlated else OperationState.RESERVED
+    )
+    if not correlated:
+        assert len(plan.facts.observation_conflicts) == 1
