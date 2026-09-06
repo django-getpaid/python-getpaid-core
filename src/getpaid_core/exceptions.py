@@ -65,6 +65,48 @@ class ReconciliationRequiredError(GetPaidException):
         self.charge_result = charge_result
 
 
+class UnsupportedRepositoryError(GetPaidException):
+    """The configured repository cannot provide the durable contract.
+
+    Raised before a money-moving operation reaches the provider, so an
+    adapter that cannot commit financial facts, operation state and
+    replay evidence atomically never submits a financial command. There
+    is deliberately no compatibility fallback to unconditional saves.
+    """
+
+
+class StateConflictError(GetPaidException):
+    """A concurrent writer committed first; the plan was built on stale facts.
+
+    This is a *local* semantic conflict, not a provider failure. The
+    caller may replan the same transition against freshly read facts --
+    :attr:`retry_locally` -- but must never take it as permission to send
+    the financial command to the provider again
+    (:attr:`provider_resubmission_allowed`). Resubmission is governed by
+    the provider's own idempotency guarantee, not by this error.
+    """
+
+    retry_locally = True
+    provider_resubmission_allowed = False
+
+
+class OperationConflictError(GetPaidException):
+    """The requested operation intent conflicts with a durable one.
+
+    Either another mutation is still outstanding on the payment, or the
+    same operation ID was reserved with different request parameters.
+    Neither is retryable without a decision by the caller.
+    """
+
+
+class ConformanceError(GetPaidException):
+    """A storage adapter failed a durable-contract conformance check.
+
+    Raised only by :mod:`getpaid_core.durable.conformance`, whose message
+    names the check that failed and what it observed.
+    """
+
+
 class BackendNotFoundError(GetPaidException, KeyError):
     """No payment backend registered for the requested slug.
 

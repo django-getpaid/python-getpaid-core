@@ -63,12 +63,18 @@ def _charge_log_summary(
     }
 
 
-class PaymentFlow:
-    """Core payment processing orchestrator."""
+class BaseFlow:
+    """What every flow shares: configuration, validators and processors.
+
+    Concrete flows differ in the storage contract they orchestrate --
+    :class:`PaymentFlow` over the released ``PaymentRepository``,
+    ``DurablePaymentFlow`` over the durable one -- not in how they reach
+    a processor or run operation validators.
+    """
 
     def __init__(
         self,
-        repository: PaymentRepository,
+        repository: Any,
         config: dict[str, dict[str, Any]] | None = None,
         validators: list[OperationValidator] | None = None,
         registry: PluginRegistry | None = None,
@@ -77,6 +83,48 @@ class PaymentFlow:
         self.config: dict[str, dict[str, Any]] = config or {}
         self.validators: list[OperationValidator] = validators or []
         self.registry = registry or default_registry
+
+    def get_processor(
+        self,
+        payment: Payment,
+    ) -> Any:
+        """Instantiate the processor for a payment.
+
+        Raises ``BackendNotFoundError`` (a ``KeyError`` subclass) when
+        the payment's backend is not registered.
+        """
+        processor_class = self.registry.get_by_slug(payment.backend)
+        backend_config = self.config.get(payment.backend, {})
+        return processor_class(payment, config=backend_config)
+
+    def _run_operation_validators(
+        self,
+        **context: Any,
+    ) -> dict[str, Any]:
+        return run_validators(context, validators=self.validators)
+
+
+class PaymentFlow(BaseFlow):
+    """Core payment processing orchestrator.
+
+    This is the released 3.x flow: it applies updates to the payment
+    object the caller supplies and saves it. Two independent snapshots of
+    one payment can overwrite each other's committed amounts, so it makes
+    no atomicity guarantee across workers. Integrations that need one
+    move to ``getpaid_core.durable.DurablePaymentFlow`` over a repository
+    implementing the durable contract; see the durable storage contract
+    documentation for the upgrade boundary.
+    """
+
+    def __init__(
+        self,
+        repository: PaymentRepository,
+        config: dict[str, dict[str, Any]] | None = None,
+        validators: list[OperationValidator] | None = None,
+        registry: PluginRegistry | None = None,
+    ) -> None:
+        super().__init__(repository, config, validators, registry)
+        self.repository: PaymentRepository = repository
 
     async def create_payment(
         self,
@@ -400,19 +448,6 @@ class PaymentFlow:
             await self.repository.save(payment)
         return success
 
-    def get_processor(
-        self,
-        payment: Payment,
-    ) -> Any:
-        """Instantiate the processor for a payment.
-
-        Raises ``BackendNotFoundError`` (a ``KeyError`` subclass) when
-        the payment's backend is not registered.
-        """
-        processor_class = self.registry.get_by_slug(payment.backend)
-        backend_config = self.config.get(payment.backend, {})
-        return processor_class(payment, config=backend_config)
-
     @staticmethod
     def _validate_provider_amount(
         payment: Payment,
@@ -452,9 +487,3 @@ class PaymentFlow:
                 context=context,
                 charge_result=charge_result,
             ) from exc
-
-    def _run_operation_validators(
-        self,
-        **context: Any,
-    ) -> dict[str, Any]:
-        return run_validators(context, validators=self.validators)

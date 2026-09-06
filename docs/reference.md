@@ -40,6 +40,52 @@
    :undoc-members:
 ```
 
+## Durable Records
+
+```{eval-rst}
+.. automodule:: getpaid_core.durable.records
+   :members:
+   :undoc-members:
+```
+
+## Durable Repository
+
+```{eval-rst}
+.. automodule:: getpaid_core.durable.repository
+   :members:
+   :undoc-members:
+```
+
+## Durable Rules
+
+```{eval-rst}
+.. automodule:: getpaid_core.durable.rules
+   :members:
+   :undoc-members:
+```
+
+## Durable Flow
+
+```{eval-rst}
+.. automodule:: getpaid_core.durable.flow
+   :members:
+   :undoc-members:
+```
+
+## Adapter Conformance
+
+```{eval-rst}
+.. automodule:: getpaid_core.durable.conformance
+   :members:
+   :undoc-members:
+```
+
+```{eval-rst}
+.. automodule:: getpaid_core.durable.memory
+   :members:
+   :undoc-members:
+```
+
 ## Exceptions
 
 ```{eval-rst}
