@@ -307,9 +307,45 @@ inspect flagged terminal records too, but cannot authorize their resubmission.
 A later query/callback can record financial evidence; the conservative flag
 remains until an audited decision clears it.
 
-This asyncio-specific retention attempt is awaited inline, without shielding or
-background tasks. Cancellation still propagates; cancellation-aware bounded
-cleanup belongs to the subsequent cancellation slice, not this guarantee.
+(cancellation-aware-cleanup)=
+### Cancellation
+
+Cancellation always propagates. Core never turns a cancelled task into provider
+rejection, an ordinary success or a silent return. Before it propagates, one
+bounded local cleanup runs -- and only where the provider has already been
+reached:
+
+| Cancelled at | Cleanup | If the cleanup does not land |
+|---|---|---|
+| Reservation or submission claim | none; nothing was submitted | a committed reservation is already discoverable |
+| Awaiting the provider | records an `unknown` outcome and retires this worker's response claim | the `submitting` record stays discoverable |
+| The outcome write after a provider response | commits that outcome once more, or retains its safe evidence and flags reconciliation | the durable record written before it remains the recovery anchor |
+| An authoritative query's evidence write | the same, acknowledging no submitting worker | the same |
+| Operator resolution, or applying an observation | none; neither carries an outstanding provider effect of its own | retry the same resolution ID; redelivery of the callback is the provider's job |
+
+Task cancellation is not provider cancellation. A cancelled wait cannot
+establish whether the command reached the provider, so the recorded outcome is
+`unknown` -- never rejection, and never permission to submit again. Retry
+eligibility stays governed by the provider's declared idempotency guarantee.
+
+Cleanup is one owned task bounded by `recovery_timeout`, writing only through
+the repository: no provider I/O, no unbounded shield, and no detached background
+save. A cancellation arriving *during* cleanup stops that task rather than
+detaching it, and propagates.
+
+Integration responsibilities:
+
+- **Budget for it.** A cancelled call can take up to `recovery_timeout` longer
+  to raise. Size request, shutdown and deployment deadlines to include it, and
+  keep the value short enough for those limits.
+- **Storage must honour it.** The bound is on an `await`: an adapter that blocks
+  the event loop, or holds a transaction open past it, defeats the bound.
+- **Reconcile afterwards.** Cancellation leaves ordinary unresolved work.
+  `list_unresolved_operations()` and `list_payments_requiring_reconciliation()`
+  are how a restarted process finds it; core schedules nothing and starts no
+  worker of its own.
+- **These are asyncio guarantees.** Core is tested on asyncio only and declares
+  no Trio or AnyIO behaviour.
 
 (safe-evidence-and-legacy-error-migration)=
 ### Safe evidence and legacy error migration

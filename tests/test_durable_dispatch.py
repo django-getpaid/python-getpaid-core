@@ -344,9 +344,11 @@ async def test_provider_wait_is_bounded_and_cancellation_remains_discoverable():
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+    # Cancelling the wait establishes an unknown outcome, not cancellation
+    # at the provider; the intent stays discoverable either way.
     assert (await repository.list_unresolved_operations())[
         0
-    ].state is OperationState.SUBMITTING
+    ].state is OperationState.UNKNOWN
 
 
 @pytest.mark.parametrize("stage", ["reservation", "submission_claim"])

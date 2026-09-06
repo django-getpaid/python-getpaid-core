@@ -59,7 +59,7 @@ unchanged; see {ref}`error migration and storage cutover <safe-evidence-and-lega
 | `OperationResult.evidence` | Safe committed evidence; result repr omits snapshot metadata and frozen request parameters |
 | `OperationNotFound()` | Lookup absence, normalized by capability to unknown or conclusively excluded execution; never return it from submission |
 | `OperationEvidenceError` / `OperationPersistenceError` | Context: payment/operation IDs, operation type, safe correlation, `evidence`, `recovery_recorded`; original failure in `__cause__`; `provider_resubmission_allowed=False` |
-| `DurablePaymentFlow(..., recovery_timeout=5.0)` | Positive finite seconds for one inline local evidence-retention attempt, without shielding or detached work |
+| `DurablePaymentFlow(..., recovery_timeout=5.0)` | Positive finite seconds bounding one local cleanup write -- evidence retention, or the write that completes an interrupted one -- as a single owned task, never detached |
 | `OperatorResolution` | Required stable `resolution_id`, actor, reason, nonempty evidence-reference tuple, aware `resolved_at`, terminal normalized outcome; `clear_payment_reconciliation=False` |
 | `flow.resolve_operation(payment_id, operation_id, resolution, *, expected_operation, expected_facts)` | Returns `OperationResult`; atomic reviewed-state comparison, audit and financial effects, no provider I/O |
 | `plan_operation_failure(operation, evidence)` | Returns an operation with unique retained claims and a reconciliation flag; no money/state change |

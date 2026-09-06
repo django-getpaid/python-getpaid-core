@@ -20,8 +20,17 @@ from tests.test_durable_dispatch import make_flow
 
 
 async def recovery_flow(
-    operation_type, outcome, repository_type=InMemoryDurableRepository
+    operation_type,
+    outcome,
+    repository_type=InMemoryDurableRepository,
+    *,
+    before_response=None,
 ):
+    """Build a restricted-mode flow whose provider returns ``outcome``.
+
+    ``before_response`` runs inside the provider call, before it returns:
+    a barrier for tests that must interrupt a submission in flight.
+    """
     calls = []
 
     class Recording(MockProcessor):
@@ -32,6 +41,8 @@ async def recovery_flow(
         @classmethod
         async def submit_operation(cls, operation, *, config):
             calls.append(operation)
+            if before_response is not None:
+                await before_response()
             return outcome
 
     money = operation_type in {

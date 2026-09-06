@@ -11,6 +11,17 @@
   repeated identical disputes do not grow the record. No raw provider payloads
   are retained. The adapter conformance suite now checks this storage contract.
 
+- **Cancellation is recoverable**: cancelling a durable command after the
+  provider has been reached now runs one bounded local cleanup before the
+  `CancelledError` propagates. A cancelled wait for the provider records an
+  `unknown` outcome and retires that worker's response claim; a cancelled
+  outcome write is completed once more, or its safe evidence retained with a
+  reconciliation flag. Cleanup is a single owned task bounded by
+  `recovery_timeout` -- never provider I/O, never a detached save -- and a
+  further cancellation stops it, leaving the durable record as the recovery
+  anchor. Applications must budget `recovery_timeout` into their own deadlines.
+  Cancellation is never relabelled as rejection or success. asyncio only.
+
 - **Durable intent dispatch**: `DurablePaymentFlow.execute_operation()` now
   covers prepare, capture, release, refund and targeted refund cancellation.
   Application-supplied IDs bind immutable normalized parameters; same-ID retries
