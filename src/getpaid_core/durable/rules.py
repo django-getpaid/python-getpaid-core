@@ -127,6 +127,13 @@ def _apply_to_facts(facts: PaymentFacts, update: PaymentUpdate) -> PaymentFacts:
         ),
     ):
         if (
+            financial_update.refunded_amount is not None
+            and financial_update.refunded_amount <= view.amount_refunded
+            and event is not PaymentEvent.REFUND_CONFIRMED
+        ):
+            # A snapshot's equal/older total is not a new refund confirmation.
+            continue
+        if (
             financial_update.paid_amount is not None
             or financial_update.refunded_amount is not None
         ):
@@ -144,6 +151,14 @@ def _apply_to_facts(facts: PaymentFacts, update: PaymentUpdate) -> PaymentFacts:
         ),
     )
     result = view.to_facts()
+    if (
+        facts.status == PaymentStatus.REFUND_STARTED
+        and update.payment_event
+        not in {PaymentEvent.REFUND_CONFIRMED, PaymentEvent.REFUND_CANCELLED}
+    ):
+        # Externally initiated pending work may have no local operation record.
+        # Aggregate money alone cannot establish that the whole refund resolved.
+        result = replace(result, status=PaymentStatus.REFUND_STARTED)
     if result.captured_funds > facts.captured_funds and (
         facts.refunded_funds > 0 or facts.status == PaymentStatus.REFUND_STARTED
     ):
