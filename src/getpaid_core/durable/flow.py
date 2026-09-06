@@ -2,13 +2,15 @@
 
 Every mutation here addresses a payment by identity, is planned against
 the payment's *current* durable state, and returns committed state. The
-caller's payment object is an ergonomic input -- it names the payment and
-carries the backend the processor is built from -- but none of its
-financial fields is ever written back.
+legacy observation methods accept a caller's payment object for parsing,
+but none of its financial fields is ever written back. Commands accept
+only a payment identity and immutable operation intent; provider routing
+comes from stored facts.
 
-Provider I/O happens outside the repository's atomic boundary: the
-processor is called first, and only the normalized result is handed to
-the repository to commit.
+Provider I/O happens outside every repository atomic boundary. Commands
+first durably reserve an intent and claim the submission right; then the
+processor receives the frozen operation, and the normalized outcome is
+committed together with its financial effects.
 
 Choosing this flow is the cutover. It requires a repository implementing
 the durable contract and refuses anything less at construction, before a

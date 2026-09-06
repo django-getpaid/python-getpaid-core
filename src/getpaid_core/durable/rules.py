@@ -16,6 +16,7 @@ from typing import Any
 from typing import cast
 
 from getpaid_core._amounts import validate_amount
+from getpaid_core._amounts import validate_payment_amounts
 from getpaid_core.durable.records import CANCELLATION_CORRELATION
 from getpaid_core.durable.records import CANCELLATION_TARGET
 from getpaid_core.durable.records import TERMINAL_OPERATION_STATES
@@ -171,8 +172,18 @@ def _resolve_amount(
     rather than reselecting a default against a later balance.
     """
     operation_type = intent.operation_type
+    view = cast("Payment", _FactsPayment(facts))
+    validate_payment_amounts(view)
 
     if operation_type in {OperationType.PREPARE, OperationType.CANCEL_REFUND}:
+        if intent.amount is not None:
+            raise InvalidTransitionError("This operation does not accept an amount.")
+        if operation_type is OperationType.PREPARE and (
+            facts.status != PaymentStatus.NEW
+            or facts.captured_funds != 0
+            or facts.remaining_authorization != 0
+        ):
+            raise InvalidTransitionError("Only a new payment can be prepared.")
         return None
 
     if operation_type is OperationType.RELEASE_LOCK:
@@ -190,7 +201,6 @@ def _resolve_amount(
     # apart. Running them here, at reservation time, is what refuses an
     # ineligible capture *before* submission rather than after the
     # provider has moved the money.
-    view = cast("Payment", _FactsPayment(facts))
     if operation_type is OperationType.CHARGE:
         require_capture_eligible(view)
         available, name = capturable_amount(view), "Charge amount"

@@ -411,6 +411,37 @@ async def test_existing_intent_is_readable_after_provider_capability_is_disabled
     assert result.snapshot.captured_funds == Decimal("100")
 
 
+@pytest.mark.parametrize("operation_type,facts_changes", [
+    (OperationType.PREPARE, {"captured_funds": Decimal("100"), "remaining_authorization": Decimal("0"), "status": "paid"}),
+    (OperationType.RELEASE_LOCK, {"captured_funds": Decimal("101")}),
+    (OperationType.START_REFUND, {"captured_funds": Decimal("100"), "refunded_funds": Decimal("-1"), "remaining_authorization": Decimal("0"), "status": "paid"}),
+])
+async def test_ineligible_or_corrupt_current_facts_are_refused_before_io(operation_type, facts_changes):
+    from dataclasses import replace
+    from getpaid_core.durable import OperationCapabilities
+    from getpaid_core.exceptions import InvalidTransitionError
+
+    calls = []
+
+    class Recording(MockProcessor):
+        operation_capabilities = dict.fromkeys(OperationType, OperationCapabilities(
+            idempotency_scope="merchant", idempotency_window=timedelta(hours=1)))
+
+        @classmethod
+        async def submit_operation(cls, operation, *, config):
+            calls.append(operation)
+            return OperationOutcome(OperationState.SUCCEEDED)
+
+    facts = PaymentFacts("pay", Decimal("100"), backend=Recording.slug,
+                         remaining_authorization=Decimal("100"), status="pre-auth")
+    repository = InMemoryDurableRepository([replace(facts, **facts_changes)])
+    _, flow = make_flow(Recording, repository=repository)
+    with pytest.raises(InvalidTransitionError):
+        await flow.execute_operation("pay", OperationIntent("bad", operation_type), now=NOW)
+    assert calls == []
+    assert await repository.get_operation("pay", "bad") is None
+
+
 def make_flow(processor, *, repository=None, **options):
     registry = PluginRegistry()
     registry._discovered = True
