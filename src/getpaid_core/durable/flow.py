@@ -26,6 +26,9 @@ from datetime import timedelta
 from time import monotonic
 from typing import Any
 
+from getpaid_core.durable.evidence import RecoveryEvidence
+from getpaid_core.durable.evidence import normalize_outcome
+from getpaid_core.durable.evidence import safe_handle
 from getpaid_core.durable.provider import LookupSemantics
 from getpaid_core.durable.provider import OperationCapabilities
 from getpaid_core.durable.provider import OperationResult
@@ -199,20 +202,22 @@ class DurablePaymentFlow(BaseFlow):
     async def _record_evidence(
         self, operation: OperationRecord, outcome: OperationOutcome
     ) -> OperationResult:
+        evidence = RecoveryEvidence.from_outcome(outcome)
         context = {
             "payment_id": operation.payment_id,
             "operation_id": operation.operation_id,
             "operation_type": operation.operation_type.value,
-            "correlation": operation.correlation,
+            "correlation": evidence.correlation
+            or safe_handle(operation.correlation),
+            "evidence": evidence,
         }
         if not isinstance(outcome, OperationOutcome):
             raise OperationEvidenceError(
                 "Processor must return a normalized OperationOutcome.",
                 context=context,
             )
-        if isinstance(outcome.correlation, str):
-            context["correlation"] = outcome.correlation
         try:
+            outcome = normalize_outcome(outcome)
             plan = await self.repository.record_operation_outcome(
                 operation.payment_id, operation.operation_id, outcome
             )
