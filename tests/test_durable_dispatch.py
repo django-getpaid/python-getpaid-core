@@ -223,6 +223,7 @@ async def test_final_write_failure_exposes_safe_identity_and_keeps_recovery_anch
         "operation_type": "charge",
         "correlation": "charge-1",
         "evidence": caught.value.context["evidence"],
+        "recovery_recorded": True,
     }
     assert caught.value.provider_resubmission_allowed is False
     assert isinstance(caught.value.__cause__, OSError)

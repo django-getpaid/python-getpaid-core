@@ -16,6 +16,8 @@ from collections.abc import Iterable
 from collections.abc import Sequence
 from datetime import datetime
 
+from getpaid_core.durable.evidence import RecoveryEvidence
+from getpaid_core.durable.evidence import plan_operation_failure
 from getpaid_core.durable.records import ObservationPlan
 from getpaid_core.durable.records import OperationIntent
 from getpaid_core.durable.records import OperationOutcome
@@ -145,6 +147,16 @@ class InMemoryDurableRepository:
             ]
             self._facts[payment_id] = plan.facts
             return plan
+
+    async def record_operation_failure(
+        self, payment_id: str, operation_id: str, evidence: RecoveryEvidence
+    ) -> OperationRecord:
+        async with self._lock_for(payment_id):
+            operations = self._operations.get(payment_id, [])
+            index = self._operation_index(payment_id, operation_id, operations)
+            recorded = plan_operation_failure(operations[index], evidence)
+            operations[index] = recorded
+            return recorded
 
     async def get_operation(
         self, payment_id: str, operation_id: str

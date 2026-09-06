@@ -2,9 +2,11 @@
 
 import re
 from dataclasses import dataclass
+from dataclasses import replace
 from decimal import Decimal
 
 from getpaid_core.durable.records import OperationOutcome
+from getpaid_core.durable.records import OperationRecord
 from getpaid_core.durable.records import OperationState
 from getpaid_core.exceptions import InvalidTransitionError
 
@@ -34,6 +36,18 @@ class RecoveryEvidence:
     correlation: str | None = None
     external_id: str | None = None
 
+    def __post_init__(self) -> None:
+        if self.state is not None and type(self.state) is not OperationState:
+            raise InvalidTransitionError("Recovery state must be normalized.")
+        if self.settled_amount is not None and (
+            type(self.settled_amount) is not Decimal
+            or not self.settled_amount.is_finite()
+        ):
+            raise InvalidTransitionError("Recovery amount must be finite money.")
+        for handle in (self.correlation, self.external_id):
+            if handle is not None and safe_handle(handle) is None:
+                raise InvalidTransitionError("Recovery handle must be safe.")
+
     @classmethod
     def from_outcome(cls, outcome: object) -> "RecoveryEvidence":
         if not isinstance(outcome, OperationOutcome):
@@ -51,6 +65,24 @@ class RecoveryEvidence:
             correlation=safe_handle(outcome.correlation),
             external_id=safe_handle(outcome.external_id),
         )
+
+
+def plan_operation_failure(
+    operation: OperationRecord, evidence: RecoveryEvidence
+) -> OperationRecord:
+    """Retain response claims without pretending they are applied settlement.
+
+    Only the operation is flagged: clearing this local recording failure must
+    not later erase an unrelated payment-wide reconciliation requirement.
+    """
+    if type(evidence) is not RecoveryEvidence:
+        raise InvalidTransitionError("Recovery evidence must be normalized.")
+    retained = operation.recovery_evidence
+    if evidence not in retained:
+        retained = (*retained, evidence)
+    return replace(
+        operation, reconciliation_required=True, recovery_evidence=retained
+    )
 
 
 def normalize_outcome(outcome: OperationOutcome) -> OperationOutcome:

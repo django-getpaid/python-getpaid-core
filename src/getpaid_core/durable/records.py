@@ -19,7 +19,12 @@ from decimal import Decimal
 from enum import StrEnum
 from hashlib import sha256
 from types import MappingProxyType
+from typing import TYPE_CHECKING
 from typing import Any
+
+
+if TYPE_CHECKING:
+    from getpaid_core.durable.evidence import RecoveryEvidence
 
 from getpaid_core.enums import FraudStatus
 from getpaid_core.enums import PaymentStatus
@@ -451,6 +456,7 @@ class OperationRecord:
     correlation: str | None = None
     reconciliation_required: bool = False
     conflicting_outcomes: tuple["OperationOutcome", ...] = ()
+    recovery_evidence: tuple["RecoveryEvidence", ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(

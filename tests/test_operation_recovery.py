@@ -118,6 +118,9 @@ async def test_post_provider_failure_retains_normalized_evidence_and_intent(
     assert caught.value.context["payment_id"] == "pay"
     assert caught.value.context["operation_id"] == "intent"
     assert caught.value.context["operation_type"] == operation_type.value
+    retained = await repository.get_operation("pay", "intent")
+    assert retained.recovery_evidence == (evidence,)
+    assert retained.reconciliation_required
     assert any(
         record.operation_id == "intent"
         for record in await repository.list_unresolved_operations()

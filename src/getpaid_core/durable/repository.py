@@ -22,6 +22,7 @@ from typing import Protocol
 from typing import cast
 from typing import runtime_checkable
 
+from getpaid_core.durable.evidence import RecoveryEvidence
 from getpaid_core.durable.records import ObservationPlan
 from getpaid_core.durable.records import OperationIntent
 from getpaid_core.durable.records import OperationOutcome
@@ -109,6 +110,16 @@ class DurablePaymentRepository(Protocol):
         """
         ...
 
+    async def record_operation_failure(
+        self, payment_id: str, operation_id: str, evidence: RecoveryEvidence
+    ) -> OperationRecord:
+        """Apply ``plan_operation_failure`` to the current operation atomically.
+
+        Preserve financial facts and prior evidence. Failure here does not
+        erase the earlier durable submission; discovery must still find it.
+        """
+        ...
+
     async def get_operation(
         self, payment_id: str, operation_id: str
     ) -> OperationRecord | None:
@@ -145,6 +156,7 @@ MANDATORY_OPERATIONS: tuple[str, ...] = (
     "claim_submission",
     "apply_observation",
     "record_operation_outcome",
+    "record_operation_failure",
     "get_operation",
     "list_unresolved_operations",
     "list_payments_requiring_reconciliation",

@@ -634,7 +634,9 @@ def plan_reservation(
             )
         return ReservationPlan(operation=record, created=False, facts=facts)
 
-    if facts.reconciliation_required:
+    if facts.reconciliation_required or any(
+        record.reconciliation_required for record in operations
+    ):
         raise ReconciliationBlockedError(
             f"Payment {facts.payment_id!r} requires reconciliation; "
             f"{intent.operation_id!r} cannot be reserved until the "
