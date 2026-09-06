@@ -33,7 +33,12 @@ Each of those calls is **one atomic boundary**. The payment's financial
 facts, the affected operation record and the replay evidence commit
 together or not at all. Core supplies the validation and transition rules
 that run inside it — `plan_observation`, `plan_reservation`,
-`plan_submission` and `plan_outcome` — so no adapter reimplements them.
+`plan_submission` and `plan_outcome` — so no adapter reimplements them. Supply the complete
+retained operation history to `plan_outcome(..., operations=...)`, not only
+the active operation: distinct refunds can settle after a cancellation allowed
+another reservation against an overlapping baseline. Commit every
+`OutcomePlan.related_operations` record atomically, and commit the financial
+projection in `ReservationPlan.facts` together with a new reservation.
 
 `supports_durable_state(repository)` answers whether an adapter qualifies;
 `missing_durable_operations(repository)` names what is absent.
@@ -195,7 +200,9 @@ query declared authoritative evidence; there is no scheduler in core.
 available. A failed lookup does not authorize retry. The attempt still needs
 the original idempotency scope and a valid original window, also bounded by
 the current declaration. Core leaves a full `provider_timeout` of headroom
-(default 30 seconds) and counts query elapsed time against the deadline. A
+(default 30 seconds) and counts all elapsed time, including repository claim
+acknowledgement, against the deadline. It checks again immediately before
+provider I/O, including a delayed first submission. A
 provider without lookup can safely replay only under that same valid key
 guarantee. An absent/expired guarantee, scope change, pending acceptance or
 reconciliation flag refuses resubmission. Neither local record retention nor
@@ -233,7 +240,13 @@ Reservation freezes that target correlation for submission. Other commands
 remain blocked while either operation is uncertain. Confirmed cancellation
 resolves the unexecuted target without decreasing refunded funds; a racing
 settlement is preserved, not overwritten. A callback completing an operation
-before a late acceptance response cannot downgrade terminal state.
+before a late acceptance response cannot downgrade terminal state. Confirmed
+refund intents also establish a cumulative lower bound above their earliest
+reserved baseline. This preserves separately completed refunds when an older
+cancelled refund settles late, without adding request amounts to callback-updated
+facts. Retain and supply the complete operation history for that calculation.
+Unknown external contributions still require trustworthy cumulative evidence;
+core does not infer their identity from equal amounts.
 
 ## Who owns replay evidence
 

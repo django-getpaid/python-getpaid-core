@@ -96,8 +96,10 @@ class DurablePaymentRepository(Protocol):
 
         Returns the committed operation record together with the facts it
         settled and any related operations; all commit atomically. Load
-        the payment's operations for ``plan_outcome`` so a cancellation can
-        resolve its target and refund status reflects outstanding work.
+        the payment's complete retained operation history for ``plan_outcome``
+        so a cancellation can resolve its target, refund status reflects
+        outstanding work, and confirmed refunds with overlapping reservation
+        baselines are counted. Passing only active records is insufficient.
         """
         ...
 

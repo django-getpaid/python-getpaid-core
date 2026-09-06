@@ -169,14 +169,22 @@ class DurablePaymentFlow(BaseFlow):
         )
 
     async def _submit(
-        self, processor: Any, operation: OperationRecord,
-        capability: OperationCapabilities, *, now: datetime, started: float,
+        self,
+        processor: Any,
+        operation: OperationRecord,
+        capability: OperationCapabilities,
+        *,
+        now: datetime,
+        started: float,
     ) -> OperationResult:
         # Claim acknowledgement may have consumed the entire key lifetime.
         # Recheck after every local await, immediately before provider I/O.
         current_time = now + timedelta(seconds=monotonic() - started)
-        if operation.retry_until is not None and not self._within_submission_window(
-            operation, capability, current_time
+        if (
+            operation.retry_until is not None
+            and not self._within_submission_window(
+                operation, capability, current_time
+            )
         ):
             return await self._operation_result(operation)
         try:
@@ -291,16 +299,17 @@ class DurablePaymentFlow(BaseFlow):
         now: datetime,
     ) -> bool:
         operation = result.operation
-        if (
-            result.reconciliation_required
-            or operation.state
-            not in {OperationState.UNKNOWN, OperationState.SUBMITTING}
-        ):
+        if result.reconciliation_required or operation.state not in {
+            OperationState.UNKNOWN,
+            OperationState.SUBMITTING,
+        }:
             return False
         return self._within_submission_window(operation, capability, now)
 
     def _within_submission_window(
-        self, operation: OperationRecord, capability: OperationCapabilities,
+        self,
+        operation: OperationRecord,
+        capability: OperationCapabilities,
         now: datetime,
     ) -> bool:
         if (

@@ -470,7 +470,8 @@ def _settlement_update(
 
 
 def _confirmed_refund_total(
-    operation: OperationRecord, settled: Decimal,
+    operation: OperationRecord,
+    settled: Decimal,
     operations: Iterable[OperationRecord],
 ) -> Decimal:
     """A cumulative lower bound proved by distinct confirmed refund intents.
@@ -483,7 +484,8 @@ def _confirmed_refund_total(
     The complete retained operation history is required for this proof.
     """
     refunds = [
-        record for record in operations
+        record
+        for record in operations
         if record.payment_id == operation.payment_id
         and record.operation_type is OperationType.START_REFUND
         and record.operation_id != operation.operation_id
@@ -494,13 +496,17 @@ def _confirmed_refund_total(
     )
     baseline = min(baseline, operation.starting_refunded)
     confirmed = sum(
-        (record.settled_amount for record in refunds
-         if record.state is OperationState.SUCCEEDED
-         and record.settled_amount is not None),
+        (
+            record.settled_amount
+            for record in refunds
+            if record.state is OperationState.SUCCEEDED
+            and record.settled_amount is not None
+        ),
         start=Decimal("0"),
     )
-    return max(operation.starting_refunded + settled,
-               baseline + confirmed + settled)
+    return max(
+        operation.starting_refunded + settled, baseline + confirmed + settled
+    )
 
 
 def plan_outcome(
@@ -518,8 +524,10 @@ def plan_outcome(
     operation discoverable as unresolved work. Late nonterminal evidence
     cannot downgrade a terminal operation; contradictory terminal evidence
     or correlation flags reconciliation without overwriting established
-    facts. Load ``operations`` in the same boundary: cancellation success
-    requires its target and returns it through ``related_operations``.
+    facts. Load the complete retained ``operations`` in the same boundary:
+    cancellation success requires its target and returns it through
+    ``related_operations``; confirmed refunds establish a cumulative lower
+    bound even when cancellation let their reservation baselines overlap.
     """
     operations = tuple(operations)
     for name in ("correlation", "external_id"):
@@ -627,9 +635,12 @@ def plan_outcome(
         update = _settlement_update(operation, outcome)
         if operation.operation_type is OperationType.START_REFUND:
             assert settled is not None  # validated by _settlement_update
-            update = replace(update, refunded_amount=_confirmed_refund_total(
-                operation, settled, operations
-            ))
+            update = replace(
+                update,
+                refunded_amount=_confirmed_refund_total(
+                    operation, settled, operations
+                ),
+            )
         if operation.operation_type is OperationType.CANCEL_REFUND:
             target_id = operation.parameters.get(CANCELLATION_TARGET)
             target = next(
