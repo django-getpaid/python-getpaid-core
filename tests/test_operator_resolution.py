@@ -6,10 +6,12 @@ from decimal import Decimal
 import pytest
 
 from getpaid_core.durable import InMemoryDurableRepository
+from getpaid_core.durable import OperationIntent
 from getpaid_core.durable import OperationOutcome
 from getpaid_core.durable import OperationState
 from getpaid_core.durable import OperationType
 from getpaid_core.durable import OperatorResolution
+from getpaid_core.durable import PaymentFacts
 from getpaid_core.durable import PaymentObservation
 from getpaid_core.exceptions import InvalidTransitionError
 from getpaid_core.exceptions import OperationConflictError
@@ -142,6 +144,67 @@ async def test_operator_cannot_force_impossible_money(amount):
         )
     assert await repository.get_payment_facts("pay") == before.snapshot
     assert await repository.get_operation("pay", "intent") == before.operation
+
+
+async def test_operator_corrects_partial_capture_without_replaying_settlement():
+    repository = InMemoryDurableRepository(
+        [
+            PaymentFacts(
+                "pay",
+                Decimal("100"),
+                remaining_authorization=Decimal("100"),
+                status="pre-auth",
+            )
+        ]
+    )
+    await repository.reserve_operation(
+        "pay", OperationIntent("capture", OperationType.CHARGE, Decimal("30"))
+    )
+    original = OperationOutcome(
+        OperationState.SUCCEEDED,
+        settled_amount=Decimal("20"),
+        correlation="capture-1",
+    )
+    corrected = replace(original, settled_amount=Decimal("30"))
+    await repository.record_operation_outcome("pay", "capture", original)
+    before = await repository.record_operation_outcome("pay", "capture", corrected)
+    assert before.facts.captured_funds == Decimal("20")
+    assert before.operation.conflicting_outcomes == (corrected,)
+    resolution = decision(outcome=corrected, clear_payment_reconciliation=True)
+    resolved = await repository.resolve_operation(
+        "pay",
+        "capture",
+        resolution,
+        expected_facts=before.facts,
+        expected_operation=before.operation,
+    )
+    assert resolved.operation.state is OperationState.SUCCEEDED
+    assert resolved.operation.settled_amount == Decimal("30")
+    assert resolved.facts.captured_funds == Decimal("30")
+    assert resolved.facts.remaining_authorization == Decimal("70")
+    assert resolved.facts.refunded_funds == Decimal("0")
+    assert not resolved.operation.reconciliation_required
+    assert not resolved.facts.reconciliation_required
+    assert resolved.operation.resolutions == (resolution,)
+    assert original in resolved.operation.conflicting_outcomes
+    assert corrected in resolved.operation.conflicting_outcomes
+    assert await repository.get_payment_facts("pay") == resolved.facts
+    assert await repository.get_operation("pay", "capture") == resolved.operation
+    retried = await repository.resolve_operation(
+        "pay",
+        "capture",
+        resolution,
+        expected_facts=before.facts,
+        expected_operation=before.operation,
+    )
+    assert retried == resolved
+    repeated = await repository.record_operation_outcome("pay", "capture", corrected)
+    assert repeated == resolved
+    disputed_again = await repository.record_operation_outcome("pay", "capture", original)
+    assert disputed_again.operation.reconciliation_required
+    assert disputed_again.facts.captured_funds == Decimal("30")
+    assert disputed_again.facts.remaining_authorization == Decimal("70")
+    assert disputed_again.operation.resolutions == (resolution,)
 
 
 async def test_resolution_cannot_erase_confirmed_effects_or_reuse_audit_identity():

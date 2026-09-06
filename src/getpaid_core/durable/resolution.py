@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 from typing import cast
 
+from getpaid_core._amounts import validate_amount
 from getpaid_core._amounts import validate_payment_amounts
 from getpaid_core.durable.evidence import normalize_outcome
 from getpaid_core.durable.records import TERMINAL_OPERATION_STATES
@@ -134,37 +135,71 @@ def plan_resolution(
         )
     validate_payment_amounts(cast("Payment", _FactsPayment(facts)))
     outcome = resolution.outcome
-    if operation.state is OperationState.SUCCEEDED and (
-        outcome.state is not OperationState.SUCCEEDED
-        or (
-            outcome.settled_amount
-            if outcome.settled_amount is not None
-            else operation.resolved_amount
-        )
-        != operation.settled_amount
-    ):
-        raise InvalidTransitionError(
-            "Resolution cannot undo confirmed effects."
-        )
+    settled = (
+        operation.resolved_amount
+        if outcome.settled_amount is None
+        else outcome.settled_amount
+    )
+    correcting_settlement = False
+    if operation.state is OperationState.SUCCEEDED:
+        if outcome.state is not OperationState.SUCCEEDED:
+            raise InvalidTransitionError(
+                "Resolution cannot undo confirmed effects."
+            )
+        if settled != operation.settled_amount:
+            if settled is None or operation.settled_amount is None:
+                raise InvalidTransitionError(
+                    "Resolution cannot change an unquantified effect."
+                )
+            validate_amount(
+                settled,
+                "Corrected settlement",
+                allow_zero=False,
+                maximum=operation.resolved_amount,
+            )
+            if settled < operation.settled_amount:
+                raise InvalidTransitionError(
+                    "Resolution cannot undo confirmed effects."
+                )
+            correcting_settlement = True
     operations = tuple(operations)
     if (
-        operation.state is OperationState.REJECTED
-        and outcome.state is OperationState.SUCCEEDED
+        (
+            correcting_settlement
+            or (
+                operation.state is OperationState.REJECTED
+                and outcome.state is OperationState.SUCCEEDED
+            )
+        )
         and any(
             entry.reservation_sequence > operation.reservation_sequence
             for entry in operations
         )
     ):
         raise InvalidTransitionError(
-            "Cannot overturn rejection after later intents; reconcile "
+            "Cannot change settlement after later intents; reconcile "
             "cumulative provider evidence without reusing an old baseline."
         )
+    conflicts = operation.conflicting_outcomes
+    if correcting_settlement:
+        previous = OperationOutcome(
+            OperationState.SUCCEEDED,
+            settled_amount=operation.settled_amount,
+            correlation=operation.correlation,
+        )
+        if previous not in conflicts:
+            conflicts = (*conflicts, previous)
     candidate = replace(
         operation,
         reconciliation_required=False,
+        conflicting_outcomes=conflicts,
+        # Only the audited path may revisit a terminal settlement. The normal
+        # outcome planner validates the corrected total against its reserved
+        # baseline and current facts, rather than adding the amount again.
         state=(
             OperationState.UNKNOWN
             if operation.state is OperationState.REJECTED
+            or correcting_settlement
             else operation.state
         ),
     )
