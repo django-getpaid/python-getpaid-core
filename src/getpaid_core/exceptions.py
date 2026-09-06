@@ -79,6 +79,17 @@ class UnsupportedProcessorError(GetPaidException):
     """The processor has not declared a safe durable operation contract."""
 
 
+class OperationPersistenceError(GetPaidException):
+    """Local durability failed after provider I/O; reconcile the stored intent.
+
+    Context contains only payment/operation identity, operation type and safe
+    known correlation. The pre-submission record remains the recovery anchor.
+    This exception never authorizes provider resubmission.
+    """
+
+    provider_resubmission_allowed = False
+
+
 class StateConflictError(GetPaidException):
     """A concurrent writer committed first; the plan was built on stale facts.
 

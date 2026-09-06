@@ -38,7 +38,9 @@ from getpaid_core.durable.records import OutcomePlan
 from getpaid_core.durable.repository import DurablePaymentRepository
 from getpaid_core.durable.repository import require_durable_state
 from getpaid_core.exceptions import CommunicationError
+from getpaid_core.exceptions import InvalidTransitionError
 from getpaid_core.exceptions import OperationConflictError
+from getpaid_core.exceptions import OperationPersistenceError
 from getpaid_core.exceptions import UnsupportedProcessorError
 from getpaid_core.flow import BaseFlow
 from getpaid_core.flow import OperationValidator
@@ -128,9 +130,28 @@ class DurablePaymentFlow(BaseFlow):
                 )
         except (TimeoutError, CommunicationError):
             outcome = OperationOutcome(OperationState.UNKNOWN)
-        plan = await self.repository.record_operation_outcome(
-            operation.payment_id, operation.operation_id, outcome
-        )
+        return await self._record_evidence(operation, outcome)
+
+    async def _record_evidence(
+        self, operation: OperationRecord, outcome: OperationOutcome
+    ) -> OperationResult:
+        try:
+            plan = await self.repository.record_operation_outcome(
+                operation.payment_id, operation.operation_id, outcome
+            )
+        except InvalidTransitionError:
+            raise
+        except Exception as exc:
+            raise OperationPersistenceError(
+                "Operation evidence could not be committed; reconcile the "
+                "durable intent before any further submission.",
+                context={
+                    "payment_id": operation.payment_id,
+                    "operation_id": operation.operation_id,
+                    "operation_type": operation.operation_type.value,
+                    "correlation": outcome.correlation or operation.correlation,
+                },
+            ) from exc
         return OperationResult(plan.operation, plan.facts)
 
     async def reconcile_operation(
@@ -164,10 +185,8 @@ class DurablePaymentFlow(BaseFlow):
             except (TimeoutError, CommunicationError):
                 # A failed query cannot erase previously established acceptance.
                 return await self._operation_result(operation)
-            plan = await self.repository.record_operation_outcome(
-                payment_id, operation_id, outcome
-            )
-            operation = plan.operation
+            result = await self._record_evidence(operation, outcome)
+            operation = result.operation
         result = await self._operation_result(operation)
         current_time = now + timedelta(seconds=monotonic() - started)
         if not resubmit or not self._retry_is_safe(

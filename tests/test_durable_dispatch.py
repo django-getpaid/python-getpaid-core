@@ -140,6 +140,45 @@ async def test_safe_retry_reuses_the_key_and_payload_after_reconciling():
     assert calls[0].retry_until == calls[1].retry_until
 
 
+async def test_final_write_failure_exposes_safe_identity_and_keeps_recovery_anchor():
+    from getpaid_core.durable.provider import OperationCapabilities
+    from getpaid_core.exceptions import OperationPersistenceError
+
+    class FailingRepository(InMemoryDurableRepository):
+        async def record_operation_outcome(self, *args):
+            raise OSError("database unavailable")
+
+    calls = []
+
+    class Successful(MockProcessor):
+        operation_capabilities = {OperationType.CHARGE: OperationCapabilities(
+            idempotency_scope="merchant", idempotency_window=timedelta(hours=1))}
+
+        @classmethod
+        async def submit_operation(cls, operation, *, config):
+            calls.append(operation)
+            return OperationOutcome(OperationState.SUCCEEDED, correlation="charge-1")
+
+    repository = FailingRepository([PaymentFacts(
+        "pay", Decimal("100"), backend=Successful.slug,
+        remaining_authorization=Decimal("100"), status="pre-auth")])
+    _, flow = make_flow(Successful, repository=repository)
+    intent = OperationIntent("capture", OperationType.CHARGE)
+    with pytest.raises(OperationPersistenceError) as caught:
+        await flow.execute_operation("pay", intent, now=NOW)
+    assert caught.value.context == {
+        "payment_id": "pay", "operation_id": "capture", "operation_type": "charge",
+        "correlation": "charge-1",
+    }
+    assert caught.value.provider_resubmission_allowed is False
+    assert isinstance(caught.value.__cause__, OSError)
+    operations = await repository.list_unresolved_operations()
+    assert len(operations) == 1
+    assert operations[0].state is OperationState.SUBMITTING
+    assert (await flow.execute_operation("pay", intent, now=NOW)).outcome is OperationState.SUBMITTING
+    assert len(calls) == 1
+
+
 def make_flow(processor, *, repository=None, **options):
     registry = PluginRegistry()
     registry._discovered = True
