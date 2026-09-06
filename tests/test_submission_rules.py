@@ -200,3 +200,44 @@ def test_conflicting_correlation_never_settles_another_provider_operation():
     assert conflict.facts.captured_funds == Decimal("0")
     assert conflict.operation.reconciliation_required
     assert conflict.facts.reconciliation_required
+
+
+async def test_pending_prepare_persists_handle_and_late_success_preserves_callback():
+    from getpaid_core.enums import PaymentEvent
+    from getpaid_core.types import PaymentUpdate
+
+    facts = PaymentFacts(payment_id="payment-1", amount_required=Decimal("100"))
+    repository = InMemoryDurableRepository([facts])
+    await repository.reserve_operation(
+        "payment-1", OperationIntent("prepare-1", OperationType.PREPARE)
+    )
+    pending = await repository.record_operation_outcome(
+        "payment-1",
+        "prepare-1",
+        OperationOutcome(
+            OperationState.PROVIDER_PENDING, external_id="order-1"
+        ),
+    )
+    assert pending.facts.external_id == "order-1"
+    await repository.apply_observation(
+        "payment-1",
+        PaymentUpdate(
+            payment_event=PaymentEvent.LOCKED,
+            locked_amount=Decimal("100"),
+            external_id="order-1",
+        ),
+    )
+    success = await repository.record_operation_outcome(
+        "payment-1",
+        "prepare-1",
+        OperationOutcome(OperationState.SUCCEEDED, external_id="order-1"),
+    )
+    assert success.facts.status is PaymentStatus.PRE_AUTH
+    assert success.facts.external_id == "order-1"
+    conflict = await repository.record_operation_outcome(
+        "payment-1",
+        "prepare-1",
+        OperationOutcome(OperationState.SUCCEEDED, external_id="order-2"),
+    )
+    assert conflict.facts.external_id == "order-1"
+    assert conflict.facts.reconciliation_required

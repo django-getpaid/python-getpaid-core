@@ -429,9 +429,15 @@ class OperationOutcome:
     settled_amount: Decimal | None = None
     correlation: str | None = None
     reconciliation_required: bool = False
+    external_id: str | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "state", OperationState(self.state))
+        try:
+            object.__setattr__(self, "state", OperationState(self.state))
+        except (ValueError, TypeError) as exc:
+            raise InvalidTransitionError(
+                "Invalid operation outcome state."
+            ) from exc
 
 
 @dataclass(frozen=True, slots=True)

@@ -32,6 +32,7 @@ from getpaid_core.durable.records import SubmissionPlan
 from getpaid_core.durable.records import validate_event_identity
 from getpaid_core.durable.records import validate_provider_metadata
 from getpaid_core.enums import PaymentEvent
+from getpaid_core.enums import PaymentStatus
 from getpaid_core.exceptions import InvalidTransitionError
 from getpaid_core.exceptions import OperationConflictError
 from getpaid_core.exceptions import ReconciliationBlockedError
@@ -412,7 +413,9 @@ def _settlement_update(
     )
 
     if operation_type is OperationType.PREPARE:
-        return PaymentUpdate(payment_event=PaymentEvent.PREPARED)
+        return PaymentUpdate(
+            payment_event=PaymentEvent.PREPARED, external_id=outcome.external_id
+        )
     if operation_type is OperationType.RELEASE_LOCK:
         return PaymentUpdate(payment_event=PaymentEvent.LOCK_RELEASED)
     if operation_type is OperationType.CANCEL_REFUND:
@@ -453,6 +456,21 @@ def plan_outcome(
     outcome -- including ``UNKNOWN`` -- moves no money and leaves the
     operation discoverable as unresolved work.
     """
+    for name in ("correlation", "external_id"):
+        value = getattr(outcome, name)
+        if value is not None and (
+            not isinstance(value, str) or not value.strip()
+        ):
+            raise InvalidTransitionError(
+                f"Outcome {name} must be a nonempty string."
+            )
+    if (
+        outcome.external_id is not None
+        and operation.operation_type is not OperationType.PREPARE
+    ):
+        raise InvalidTransitionError(
+            "Only preparation supplies a payment external ID."
+        )
     if outcome.state not in {
         OperationState.SUCCEEDED,
         OperationState.REJECTED,
@@ -494,10 +512,16 @@ def plan_outcome(
             )
         )
     )
+    conflicting_external_id = (
+        facts.external_id is not None
+        and outcome.external_id is not None
+        and facts.external_id != outcome.external_id
+    )
     reconciliation = (
         operation.reconciliation_required
         or outcome.reconciliation_required
         or conflicting_correlation
+        or conflicting_external_id
         or contradictory_terminal
     )
     recorded = replace(
@@ -509,11 +533,20 @@ def plan_outcome(
         facts,
         reconciliation_required=facts.reconciliation_required or reconciliation,
     )
-    if current in TERMINAL_OPERATION_STATES or conflicting_correlation:
+    if conflicting_correlation or conflicting_external_id:
+        return OutcomePlan(operation=recorded, facts=facts)
+    if outcome.external_id is not None:
+        facts = replace(facts, external_id=outcome.external_id)
+    if current in TERMINAL_OPERATION_STATES:
         return OutcomePlan(operation=recorded, facts=facts)
 
     if outcome.state is OperationState.SUCCEEDED:
         update = _settlement_update(operation, outcome)
+        if (
+            operation.operation_type is OperationType.PREPARE
+            and facts.status != PaymentStatus.NEW
+        ):
+            update = replace(update, payment_event=None)
         facts = _apply_to_facts(facts, update)
         recorded = replace(recorded, settled_amount=settled)
 
