@@ -245,7 +245,25 @@ def plan_observation(
 
     operations = tuple(operations)
     changed: tuple[OperationRecord, ...] = ()
-    result = _apply_to_facts(facts, update)
+    aggregate = update
+    if update.payment_event in {
+        PaymentEvent.LOCK_RELEASED,
+        PaymentEvent.REFUND_CANCELLED,
+    }:
+        scoped_release = (
+            isinstance(update, PaymentObservation)
+            and update.cancellation_scope is OperationType.RELEASE_LOCK
+            and update.payment_event is PaymentEvent.LOCK_RELEASED
+        )
+        correlated_outcome = (
+            isinstance(update, PaymentObservation)
+            and update.outcome is not None
+        )
+        if not scoped_release and not correlated_outcome:
+            facts = _retain_observation(facts, update, "ambiguous_cancellation")
+        if not scoped_release or facts.remaining_authorization == 0:
+            aggregate = replace(update, payment_event=None)
+    result = _apply_to_facts(facts, aggregate)
     if isinstance(update, PaymentObservation) and update.outcome is not None:
         candidates = [
             operation
@@ -260,7 +278,7 @@ def plan_observation(
             )
         ]
         if len(candidates) != 1:
-            result = replace(result, reconciliation_required=True)
+            result = _retain_observation(result, update, "uncorrelated_outcome")
         else:
             outcome_plan = plan_outcome(
                 result, candidates[0], update.outcome, operations=operations

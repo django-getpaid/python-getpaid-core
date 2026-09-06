@@ -221,3 +221,61 @@ async def test_stale_capture_does_not_discard_new_refund_or_metadata():
     assert plan.facts.refunded_funds == D("30")
     assert plan.facts.external_id == "payment-handle"
     assert plan.facts.status == PaymentStatus.PARTIALLY_REFUNDED
+
+
+@pytest.mark.parametrize("scoped", [False, True])
+async def test_delayed_authorization_release_is_scoped_and_never_refunds(
+    scoped,
+):
+    repository = InMemoryDurableRepository(
+        [
+            PaymentFacts(
+                "payment",
+                D("100"),
+                captured_funds=D("30"),
+                remaining_authorization=D("70"),
+                status=PaymentStatus.PARTIAL,
+            )
+        ]
+    )
+    update = PaymentObservation(
+        payment_event=PaymentEvent.LOCK_RELEASED,
+        cancellation_scope=OperationType.RELEASE_LOCK if scoped else None,
+        paid_amount=D("20"),
+        provider_event_id="release",
+    )
+    plan = await repository.apply_observation("payment", update)
+    assert plan.facts.captured_funds == D("30")
+    assert plan.facts.refunded_funds == 0
+    assert plan.facts.remaining_authorization == D("0" if scoped else "70")
+    assert plan.facts.status == PaymentStatus.PARTIAL
+    assert plan.facts.reconciliation_required is not scoped
+    if scoped:
+        # A differently identified repeat is still the same scoped fact.
+        update.provider_event_id = "later"
+        again = await repository.apply_observation("payment", update)
+        assert again.facts == plan.facts
+
+
+async def test_ambiguous_refund_cancellation_cannot_clear_active_refund():
+    repository = InMemoryDurableRepository(
+        [
+            PaymentFacts(
+                "payment",
+                D("100"),
+                captured_funds=D("100"),
+                status=PaymentStatus.PAID,
+            )
+        ]
+    )
+    await repository.reserve_operation(
+        "payment",
+        OperationIntent("refund", OperationType.START_REFUND, D("30")),
+    )
+    plan = await repository.apply_observation(
+        "payment", PaymentUpdate(payment_event=PaymentEvent.REFUND_CANCELLED)
+    )
+    assert plan.facts.status == PaymentStatus.REFUND_STARTED
+    assert plan.facts.refunded_funds == 0
+    assert plan.facts.reconciliation_required
+    assert (await repository.get_operation("payment", "refund")).is_active
