@@ -1,6 +1,9 @@
 """Counterexamples found by the independent spec review of reconciliation."""
 
+from dataclasses import replace
 from decimal import Decimal
+
+import pytest
 
 from getpaid_core.durable import InMemoryDurableRepository
 from getpaid_core.durable import PaymentFacts
@@ -55,3 +58,46 @@ async def test_zero_cumulative_totals_do_not_imply_a_refund():
     assert plan.facts.status == PaymentStatus.PREPARED
     assert plan.facts.captured_funds == plan.facts.refunded_funds == 0
     assert not plan.facts.reconciliation_required
+
+
+@pytest.mark.parametrize("identity", ["original", "different", None])
+async def test_historical_capture_with_hold_does_not_become_a_dispute(identity):
+    repository = InMemoryDurableRepository(
+        [
+            PaymentFacts(
+                "payment",
+                Decimal("100"),
+                remaining_authorization=Decimal("100"),
+                status=PaymentStatus.PRE_AUTH,
+            )
+        ]
+    )
+    original = PaymentUpdate(
+        payment_event=PaymentEvent.PAYMENT_CAPTURED,
+        paid_amount=Decimal("40"),
+        locked_amount=Decimal("60"),
+        provider_event_id="original",
+    )
+    await repository.apply_observation("payment", original)
+    await repository.apply_observation(
+        "payment",
+        PaymentUpdate(
+            payment_event=PaymentEvent.PAYMENT_CAPTURED,
+            paid_amount=Decimal("100"),
+        ),
+    )
+    await repository.apply_observation(
+        "payment",
+        PaymentUpdate(
+            payment_event=PaymentEvent.REFUND_CONFIRMED,
+            refunded_amount=Decimal("100"),
+        ),
+    )
+    before = await repository.get_payment_facts("payment")
+    plan = await repository.apply_observation(
+        "payment",
+        replace(original, provider_event_id=identity, external_id=None),
+    )
+    assert plan.facts == before
+    assert not plan.facts.reconciliation_required
+    assert plan.applied is (identity != "original")

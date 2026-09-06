@@ -112,6 +112,21 @@ def _apply_to_facts(facts: PaymentFacts, update: PaymentUpdate) -> PaymentFacts:
     the provider metadata mapping.
     """
     view = _FactsPayment(facts)
+    if (
+        update.paid_amount is not None
+        and update.paid_amount < facts.captured_funds
+    ):
+        # This snapshot's hold predates already-recorded capture. Validate its
+        # own bounds, but never reinstate authorization from that older snapshot.
+        update = replace(
+            update,
+            locked_amount=None,
+            payment_event=(
+                None
+                if update.payment_event is PaymentEvent.LOCKED
+                else update.payment_event
+            ),
+        )
     event = update.payment_event
     # Financial fields are independent cumulative claims, not payloads owned
     # exclusively by the event label. Apply capture before refund so a single
@@ -185,6 +200,17 @@ def _validate_observation(update: PaymentUpdate) -> None:
         update.provider_data, name="Observation metadata"
     )
     validate_event_identity(update.provider_event_id)
+    for amount in (
+        update.paid_amount,
+        update.refunded_amount,
+        update.locked_amount,
+    ):
+        if amount is not None and (
+            not isinstance(amount, Decimal) or not amount.is_finite()
+        ):
+            raise InvalidTransitionError(
+                "Observation amounts must be finite Decimals."
+            )
     for name in ("external_id", "fraud_message"):
         value = getattr(update, name)
         if value is not None and not isinstance(value, str):
@@ -262,14 +288,10 @@ def _financial_observation_is_possible(
     facts: PaymentFacts, update: PaymentUpdate
 ) -> bool:
     amounts = (update.paid_amount, update.refunded_amount, update.locked_amount)
-    for amount in amounts:
-        if amount is not None and (
-            not isinstance(amount, Decimal) or not amount.is_finite()
-        ):
-            raise InvalidTransitionError(
-                "Observation amounts must be finite Decimals."
-            )
     captured = max(facts.captured_funds, update.paid_amount or Decimal("0"))
+    snapshot_capture = (
+        captured if update.paid_amount is None else update.paid_amount
+    )
     return (
         all(amount is None or amount >= 0 for amount in amounts)
         and captured <= facts.amount_required
@@ -278,7 +300,11 @@ def _financial_observation_is_possible(
         )
         and (
             update.locked_amount is None
-            or (0 < update.locked_amount <= facts.amount_required - captured)
+            or (
+                0
+                < update.locked_amount
+                <= facts.amount_required - snapshot_capture
+            )
         )
     )
 
@@ -342,13 +368,6 @@ def plan_observation(
 
     _validate_observation(update)
     identity = validate_event_identity(update.provider_event_id)
-    if not _financial_observation_is_possible(facts, update):
-        return ObservationPlan(
-            facts=_retain_observation(facts, update, "financial_constraints"),
-            replay_record=None,
-            applied=False,
-        )
-
     record: ReplayRecord | None = None
     if identity is not None:
         record = ReplayRecord.for_observation(facts, update)
@@ -367,6 +386,12 @@ def plan_observation(
                 applied=False,
             )
 
+    if not _financial_observation_is_possible(facts, update):
+        return ObservationPlan(
+            facts=_retain_observation(facts, update, "financial_constraints"),
+            replay_record=None,
+            applied=False,
+        )
     operations = tuple(operations)
     changed: tuple[OperationRecord, ...] = ()
     aggregate = update
