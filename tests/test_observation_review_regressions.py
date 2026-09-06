@@ -15,7 +15,71 @@ from getpaid_core.durable import PaymentObservation
 from getpaid_core.enums import PaymentEvent
 from getpaid_core.enums import PaymentStatus
 from getpaid_core.exceptions import InvalidTransitionError
+from getpaid_core.exceptions import ReconciliationBlockedError
 from getpaid_core.types import PaymentUpdate
+
+
+@pytest.mark.parametrize(
+    ("refunded", "status"),
+    [
+        ("0", PaymentStatus.REFUND_STARTED),
+        ("10", PaymentStatus.PARTIALLY_REFUNDED),
+        ("30", PaymentStatus.REFUNDED),
+    ],
+)
+@pytest.mark.parametrize("captured", ["60", "100"])
+@pytest.mark.parametrize("capture_first", [False, True])
+async def test_combined_capture_and_release_preserves_refund_facts_atomically(
+    refunded, status, captured, capture_first
+):
+    repository = InMemoryDurableRepository(
+        [
+            PaymentFacts(
+                "payment",
+                Decimal("100"),
+                captured_funds=Decimal("30"),
+                refunded_funds=Decimal(refunded),
+                remaining_authorization=Decimal("70"),
+                status=status,
+            )
+        ]
+    )
+    if capture_first:
+        await repository.apply_observation(
+            "payment", PaymentUpdate(paid_amount=Decimal(captured))
+        )
+    update = PaymentObservation(
+        payment_event=PaymentEvent.LOCK_RELEASED,
+        cancellation_scope=OperationType.RELEASE_LOCK,
+        paid_amount=Decimal(captured),
+        provider_event_id="release-snapshot",
+        provider_data={"release_reference": "confirmed"},
+    )
+    plan = await repository.apply_observation("payment", update)
+    assert plan.applied
+    assert plan.replay_record is not None
+    assert plan.facts.captured_funds == Decimal(captured)
+    assert plan.facts.refunded_funds == Decimal(refunded)
+    assert plan.facts.remaining_authorization == 0
+    assert plan.facts.status == (
+        PaymentStatus.REFUND_STARTED
+        if status is PaymentStatus.REFUND_STARTED
+        else PaymentStatus.PARTIALLY_REFUNDED
+    )
+    assert plan.facts.reconciliation_required
+    assert not plan.facts.observation_conflicts
+    assert plan.facts.provider_data == {"release_reference": "confirmed"}
+    assert await repository.get_payment_facts("payment") == plan.facts
+    for identity in ("release-snapshot", "different-release", None):
+        replay = await repository.apply_observation(
+            "payment", replace(update, provider_event_id=identity)
+        )
+        assert replay.facts == plan.facts
+        assert replay.applied is (identity != "release-snapshot")
+    with pytest.raises(ReconciliationBlockedError):
+        await repository.reserve_operation(
+            "payment", OperationIntent("refund", OperationType.START_REFUND)
+        )
 
 
 async def test_stale_refund_total_does_not_resolve_external_refund_progress():

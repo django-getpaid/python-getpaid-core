@@ -155,6 +155,15 @@ def _apply_to_facts(facts: PaymentFacts, update: PaymentUpdate) -> PaymentFacts:
             apply_payment_update(cast("Payment", view), financial_update)
             if event is financial_update.payment_event:
                 event = None
+    if (
+        event is PaymentEvent.LOCK_RELEASED
+        and isinstance(update, PaymentObservation)
+        and update.cancellation_scope is OperationType.RELEASE_LOCK
+        and view.amount_locked == 0
+    ):
+        # The accompanying capture may have exhausted the hold. A scoped
+        # release then acknowledges current facts, just as a later one would.
+        event = None
     apply_payment_update(
         cast("Payment", view),
         replace(
@@ -440,7 +449,7 @@ def plan_observation(
         )
         if not scoped_release and not correlated_outcome:
             facts = _retain_observation(facts, update, "ambiguous_cancellation")
-        if not scoped_release or facts.remaining_authorization == 0:
+        if not scoped_release:
             aggregate = replace(aggregate, payment_event=None)
     if (
         facts.external_id is not None
