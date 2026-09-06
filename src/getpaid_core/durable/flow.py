@@ -22,6 +22,7 @@ from collections.abc import Mapping
 from datetime import datetime
 from datetime import timedelta
 from typing import Any
+from time import monotonic
 
 from getpaid_core.durable.provider import LookupSemantics
 from getpaid_core.durable.provider import OperationCapabilities
@@ -133,9 +134,17 @@ class DurablePaymentFlow(BaseFlow):
         return OperationResult(plan.operation, plan.facts)
 
     async def reconcile_operation(
-        self, payment_id: str, operation_id: str, *, now: datetime
+        self, payment_id: str, operation_id: str, *, now: datetime,
+        resubmit: bool = False,
     ) -> OperationResult:
-        """Look up evidence for an existing intent without inventing a new one."""
+        """Reconcile first; optionally claim one safe retry of an uncertain intent.
+
+        A caller explicitly requests resubmission. It is refused without the
+        original key scope and a still-valid window, including enough time for
+        the bounded provider call. No lease expiry or not-found result grants
+        an independent right to submit.
+        """
+        started = monotonic()
         if now.tzinfo is None or now.utcoffset() is None:
             raise ValueError("now must be timezone-aware.")
         operation = await self.repository.get_operation(payment_id, operation_id)
@@ -145,19 +154,50 @@ class DurablePaymentFlow(BaseFlow):
             return await self._operation_result(operation)
         processor = self.registry.get_by_slug(operation.backend)
         capability = self._capability(processor, operation.operation_type)
-        if capability.lookup_semantics is LookupSemantics.UNSUPPORTED:
-            return await self._operation_result(operation)
-        try:
-            async with asyncio.timeout(self.provider_timeout):
-                outcome = await processor.lookup_operation(
-                    operation, config=self.config.get(operation.backend, {})
-                )
-        except (TimeoutError, CommunicationError):
-            outcome = OperationOutcome(OperationState.UNKNOWN)
-        plan = await self.repository.record_operation_outcome(
-            payment_id, operation_id, outcome
+        expected_attempt = operation.submission_attempts
+        if capability.lookup_semantics is not LookupSemantics.UNSUPPORTED:
+            try:
+                async with asyncio.timeout(self.provider_timeout):
+                    outcome = await processor.lookup_operation(
+                        operation, config=self.config.get(operation.backend, {})
+                    )
+            except (TimeoutError, CommunicationError):
+                # A failed query cannot erase previously established acceptance.
+                return await self._operation_result(operation)
+            plan = await self.repository.record_operation_outcome(
+                payment_id, operation_id, outcome
+            )
+            operation = plan.operation
+        result = await self._operation_result(operation)
+        current_time = now + timedelta(seconds=monotonic() - started)
+        if not resubmit or not self._retry_is_safe(
+            result, capability, current_time
+        ):
+            return result
+        claim = await self.repository.claim_submission(
+            payment_id, operation_id, expected_attempt=expected_attempt,
+            now=current_time,
         )
-        return OperationResult(plan.operation, plan.facts)
+        if not claim.granted:
+            return await self._operation_result(claim.operation)
+        return await self._submit(processor, claim.operation)
+
+    def _retry_is_safe(
+        self, result: OperationResult, capability: OperationCapabilities,
+        now: datetime,
+    ) -> bool:
+        operation = result.operation
+        if (result.reconciliation_required
+                or operation.state not in {OperationState.UNKNOWN, OperationState.SUBMITTING}
+                or operation.submitted_at is None
+                or operation.retry_until is None
+                or capability.idempotency_window is None
+                or capability.idempotency_scope != operation.idempotency_scope):
+            return False
+        deadline = min(operation.retry_until,
+                       operation.submitted_at + capability.idempotency_window)
+        return (operation.submitted_at <= now
+                and now + timedelta(seconds=self.provider_timeout) < deadline)
 
     async def _operation_result(self, operation: OperationRecord) -> OperationResult:
         facts = await self.repository.get_payment_facts(operation.payment_id)

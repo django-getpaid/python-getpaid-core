@@ -102,6 +102,44 @@ async def test_response_loss_is_unknown_then_authoritative_lookup_settles_once()
     assert await repository.list_unresolved_operations() == ()
 
 
+async def test_safe_retry_reuses_the_key_and_payload_after_reconciling():
+    from getpaid_core.durable.provider import LookupSemantics, OperationCapabilities
+
+    calls, events, transactions = [], [], set()
+
+    class Idempotent(MockProcessor):
+        operation_capabilities = {OperationType.CHARGE: OperationCapabilities(
+            idempotency_scope="merchant", idempotency_window=timedelta(hours=1),
+            lookup_semantics=LookupSemantics.AUTHORITATIVE,
+        )}
+
+        @classmethod
+        async def submit_operation(cls, operation, *, config):
+            events.append("submit")
+            calls.append(operation)
+            transactions.add(operation.idempotency_key)
+            if len(calls) == 1:
+                raise TimeoutError
+            return OperationOutcome(OperationState.SUCCEEDED)
+
+        @classmethod
+        async def lookup_operation(cls, operation, *, config):
+            events.append("lookup")
+            return OperationOutcome(OperationState.UNKNOWN)
+
+    _, flow = make_flow(Idempotent)
+    await flow.execute_operation("pay", OperationIntent("capture", OperationType.CHARGE,
+                                                       parameters={"nested": {"items": ["a"]}}), now=NOW)
+    result = await flow.reconcile_operation("pay", "capture", now=NOW, resubmit=True)
+    assert result.outcome is OperationState.SUCCEEDED
+    assert events == ["submit", "lookup", "submit"]
+    assert len(transactions) == 1
+    assert calls[0].parameters == calls[1].parameters
+    assert calls[0].resolved_amount == calls[1].resolved_amount == Decimal("100")
+    assert calls[0].submitted_at == calls[1].submitted_at
+    assert calls[0].retry_until == calls[1].retry_until
+
+
 def make_flow(processor, *, repository=None, **options):
     registry = PluginRegistry()
     registry._discovered = True
