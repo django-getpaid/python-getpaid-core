@@ -739,6 +739,30 @@ def _confirmed_refund_total(
     return cumulative
 
 
+def _disputed_outcome(
+    facts: PaymentFacts, operation: OperationRecord, outcome: OperationOutcome
+) -> OutcomePlan:
+    """Retain only normalized disputed evidence, never plugin attributes."""
+    evidence = OperationOutcome(
+        state=outcome.state,
+        settled_amount=outcome.settled_amount,
+        correlation=outcome.correlation,
+        reconciliation_required=outcome.reconciliation_required,
+        external_id=outcome.external_id,
+    )
+    conflicts = operation.conflicting_outcomes
+    if evidence not in conflicts:
+        conflicts = (*conflicts, evidence)
+    return OutcomePlan(
+        facts=replace(facts, reconciliation_required=True),
+        operation=replace(
+            operation,
+            reconciliation_required=True,
+            conflicting_outcomes=conflicts,
+        ),
+    )
+
+
 def plan_outcome(
     facts: PaymentFacts,
     operation: OperationRecord,
@@ -798,6 +822,19 @@ def plan_outcome(
             "Only a confirmed capture or refund carries a settled amount."
         )
     if outcome.state is OperationState.SUCCEEDED:
+        if outcome.settled_amount is not None:
+            if (
+                not isinstance(outcome.settled_amount, Decimal)
+                or not outcome.settled_amount.is_finite()
+            ):
+                raise InvalidTransitionError(
+                    "Settled amount must be a finite Decimal."
+                )
+            if outcome.settled_amount <= 0 or (
+                operation.resolved_amount is not None
+                and outcome.settled_amount > operation.resolved_amount
+            ):
+                return _disputed_outcome(facts, operation, outcome)
         _settlement_update(operation, outcome)
     current = operation.state
     settled = (
@@ -839,17 +876,9 @@ def plan_outcome(
         or conflicting_external_id
         or contradictory_terminal
     ):
-        # Store only normalized fields, never arbitrary provider payloads or
-        # additional attributes on a plugin's outcome subclass.
-        evidence = OperationOutcome(
-            state=outcome.state,
-            settled_amount=outcome.settled_amount,
-            correlation=outcome.correlation,
-            reconciliation_required=outcome.reconciliation_required,
-            external_id=outcome.external_id,
-        )
-        if evidence not in conflicts:
-            conflicts = (*conflicts, evidence)
+        conflicts = _disputed_outcome(
+            facts, operation, outcome
+        ).operation.conflicting_outcomes
     recorded = replace(
         operation,
         correlation=operation.correlation or outcome.correlation,
@@ -921,6 +950,8 @@ def plan_outcome(
             and facts.status != PaymentStatus.NEW
         ):
             update = replace(update, payment_event=None)
+        if not _financial_observation_is_possible(facts, update):
+            return _disputed_outcome(facts, recorded, outcome)
         facts = _apply_to_facts(facts, update)
         recorded = replace(recorded, settled_amount=settled)
 

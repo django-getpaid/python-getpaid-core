@@ -423,3 +423,41 @@ async def test_uncorrelated_same_amount_cannot_resolve_current_refund(identity):
     assert (
         await repository.get_operation("payment", "refund")
     ).state == OperationState.RESERVED
+
+
+async def test_correlated_settlement_exceeding_reservation_is_retained():
+    repository = InMemoryDurableRepository(
+        [
+            PaymentFacts(
+                "payment",
+                D("100"),
+                captured_funds=D("100"),
+                status=PaymentStatus.PAID,
+            )
+        ]
+    )
+    await repository.reserve_operation(
+        "payment",
+        OperationIntent("refund", OperationType.START_REFUND, D("100")),
+    )
+    await repository.apply_observation(
+        "payment",
+        PaymentUpdate(
+            payment_event=PaymentEvent.REFUND_CONFIRMED,
+            refunded_amount=D("100"),
+        ),
+    )
+    plan = await repository.apply_observation(
+        "payment",
+        PaymentObservation(
+            operation_id="refund",
+            outcome=OperationOutcome(
+                OperationState.SUCCEEDED, settled_amount=D("120")
+            ),
+        ),
+    )
+    assert plan.facts.refunded_funds == D("100")
+    assert plan.facts.reconciliation_required
+    operation = await repository.get_operation("payment", "refund")
+    assert operation.state == OperationState.RESERVED
+    assert operation.conflicting_outcomes[0].settled_amount == D("120")
