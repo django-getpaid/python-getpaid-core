@@ -79,6 +79,16 @@ class UnsupportedProcessorError(GetPaidException):
     """The processor has not declared a safe durable operation contract."""
 
 
+class OperationEvidenceError(InvalidTransitionError):
+    """A provider response cannot establish a valid operation outcome.
+
+    This is post-submission validation failure, not provider rejection.
+    Reconcile the durable intent; never blindly retry the command.
+    """
+
+    provider_resubmission_allowed = False
+
+
 class OperationPersistenceError(GetPaidException):
     """Local durability failed after provider I/O; reconcile the stored intent.
 

@@ -40,6 +40,7 @@ from getpaid_core.durable.repository import require_durable_state
 from getpaid_core.exceptions import CommunicationError
 from getpaid_core.exceptions import InvalidTransitionError
 from getpaid_core.exceptions import OperationConflictError
+from getpaid_core.exceptions import OperationEvidenceError
 from getpaid_core.exceptions import OperationPersistenceError
 from getpaid_core.exceptions import UnsupportedProcessorError
 from getpaid_core.flow import BaseFlow
@@ -135,22 +136,32 @@ class DurablePaymentFlow(BaseFlow):
     async def _record_evidence(
         self, operation: OperationRecord, outcome: OperationOutcome
     ) -> OperationResult:
+        context = {
+            "payment_id": operation.payment_id,
+            "operation_id": operation.operation_id,
+            "operation_type": operation.operation_type.value,
+            "correlation": operation.correlation,
+        }
+        if not isinstance(outcome, OperationOutcome):
+            raise OperationEvidenceError(
+                "Processor must return a normalized OperationOutcome.", context=context
+            )
+        if isinstance(outcome.correlation, str):
+            context["correlation"] = outcome.correlation
         try:
             plan = await self.repository.record_operation_outcome(
                 operation.payment_id, operation.operation_id, outcome
             )
-        except InvalidTransitionError:
-            raise
+        except (InvalidTransitionError, OperationConflictError) as exc:
+            raise OperationEvidenceError(
+                "Provider evidence could not be applied; reconcile the durable intent.",
+                context=context,
+            ) from exc
         except Exception as exc:
             raise OperationPersistenceError(
                 "Operation evidence could not be committed; reconcile the "
                 "durable intent before any further submission.",
-                context={
-                    "payment_id": operation.payment_id,
-                    "operation_id": operation.operation_id,
-                    "operation_type": operation.operation_type.value,
-                    "correlation": outcome.correlation or operation.correlation,
-                },
+                context=context,
             ) from exc
         return OperationResult(plan.operation, plan.facts)
 

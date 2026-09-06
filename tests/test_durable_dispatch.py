@@ -179,6 +179,29 @@ async def test_final_write_failure_exposes_safe_identity_and_keeps_recovery_anch
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize("bad_outcome", [None, "secret raw payload", OperationOutcome(OperationState.SUCCEEDED, settled_amount=Decimal("101"))])
+async def test_invalid_provider_evidence_is_not_a_persistence_error_or_rejection(bad_outcome):
+    from getpaid_core.durable.provider import OperationCapabilities
+    from getpaid_core.exceptions import OperationEvidenceError
+
+    class InvalidProvider(MockProcessor):
+        operation_capabilities = {OperationType.CHARGE: OperationCapabilities(
+            idempotency_scope="merchant", idempotency_window=timedelta(hours=1))}
+
+        @classmethod
+        async def submit_operation(cls, operation, *, config):
+            return bad_outcome
+
+    repository, flow = make_flow(InvalidProvider)
+    with pytest.raises(OperationEvidenceError) as caught:
+        await flow.execute_operation("pay", OperationIntent("capture", OperationType.CHARGE), now=NOW)
+    assert caught.value.context["operation_id"] == "capture"
+    assert "secret raw payload" not in str(caught.value)
+    assert caught.value.provider_resubmission_allowed is False
+    assert (await repository.get_payment_facts("pay")).captured_funds == 0
+    assert (await repository.list_unresolved_operations())[0].state is OperationState.SUBMITTING
+
+
 def make_flow(processor, *, repository=None, **options):
     registry = PluginRegistry()
     registry._discovered = True
