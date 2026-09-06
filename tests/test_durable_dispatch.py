@@ -202,6 +202,47 @@ async def test_invalid_provider_evidence_is_not_a_persistence_error_or_rejection
     assert (await repository.list_unresolved_operations())[0].state is OperationState.SUBMITTING
 
 
+async def test_declared_capability_without_submission_implementation_is_refused():
+    from getpaid_core.durable import OperationCapabilities
+    from getpaid_core.exceptions import UnsupportedProcessorError
+
+    class DeclarationOnly(MockProcessor):
+        operation_capabilities = {OperationType.CHARGE: OperationCapabilities(
+            idempotency_scope="merchant", idempotency_window=timedelta(hours=1))}
+
+    repository, flow = make_flow(DeclarationOnly)
+    with pytest.raises(UnsupportedProcessorError):
+        await flow.execute_operation("pay", OperationIntent("capture", OperationType.CHARGE), now=NOW)
+    assert await repository.get_operation("pay", "capture") is None
+
+
+async def test_provider_wait_is_bounded_and_cancellation_remains_discoverable():
+    from getpaid_core.durable import OperationCapabilities
+
+    entered = asyncio.Event()
+
+    class Waiting(MockProcessor):
+        operation_capabilities = {OperationType.CHARGE: OperationCapabilities(
+            idempotency_scope="merchant", idempotency_window=timedelta(hours=1))}
+
+        @classmethod
+        async def submit_operation(cls, operation, *, config):
+            entered.set()
+            await asyncio.Event().wait()
+
+    _, timeout_flow = make_flow(Waiting, provider_timeout=0.001)
+    result = await timeout_flow.execute_operation("pay", OperationIntent("timed-out", OperationType.CHARGE), now=NOW)
+    assert result.outcome is OperationState.UNKNOWN
+    entered.clear()
+    repository, flow = make_flow(Waiting)
+    task = asyncio.create_task(flow.execute_operation("pay", OperationIntent("cancelled", OperationType.CHARGE), now=NOW))
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert (await repository.list_unresolved_operations())[0].state is OperationState.SUBMITTING
+
+
 def make_flow(processor, *, repository=None, **options):
     registry = PluginRegistry()
     registry._discovered = True

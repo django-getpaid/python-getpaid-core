@@ -45,6 +45,7 @@ from getpaid_core.exceptions import OperationPersistenceError
 from getpaid_core.exceptions import UnsupportedProcessorError
 from getpaid_core.flow import BaseFlow
 from getpaid_core.flow import OperationValidator
+from getpaid_core.processor import BaseProcessor
 from getpaid_core.protocols import Payment
 from getpaid_core.registry import PluginRegistry
 
@@ -82,6 +83,16 @@ class DurablePaymentFlow(BaseFlow):
                 f"Processor {processor.slug!r} must declare durable operation "
                 "capabilities before submission."
             )
+        methods = ["submit_operation"]
+        if capability.lookup_semantics is not LookupSemantics.UNSUPPORTED:
+            methods.append("lookup_operation")
+        for name in methods:
+            method = getattr(processor, name, None)
+            default = getattr(BaseProcessor, name)
+            if not callable(method) or getattr(method, "__func__", method) is getattr(default, "__func__", default):
+                raise UnsupportedProcessorError(
+                    f"Declared durable capability requires {name} implementation."
+                )
         if (capability.idempotency_window is None
                 and capability.lookup_semantics.value == "unsupported"
                 and operation_type not in self.restricted_operations):

@@ -1,5 +1,26 @@
 # Core Concepts
 
+## Durable Operation Intents
+
+`DurablePaymentFlow.execute_operation()` requires an application-assigned
+operation ID for each deliberate prepare, capture, authorization release,
+refund or refund cancellation. Retries use the same ID and immutable request;
+separate partial captures/refunds use new IDs. Reservation freezes the concrete
+amount and starting totals, then an atomic submission claim precedes provider
+I/O. See [Durable Storage Contract](durable-storage.md#durable-operation-dispatch)
+for processor capabilities, adapter upgrades and recovery.
+
+Operation state is separate from payment status: `RESERVED`, `SUBMITTING`,
+`PROVIDER_PENDING`, `SUCCEEDED`, `REJECTED` and nonterminal `UNKNOWN` describe
+one intent. Acceptance is not settlement. Unknown/pending operations block
+unrelated commands while observations and reconciliation remain available.
+The structured `OperationResult` reports operation identity, outcome, committed
+snapshot and reconciliation requirement. Retrying an uncertain command is not
+permission to submit it again, even after a crash or lease expiry.
+
+These guarantees belong to the explicit durable flow, **not** the released
+`PaymentFlow` API described in the legacy request/result sections below.
+
 ## Payment Statuses
 
 Payments move through these states:
