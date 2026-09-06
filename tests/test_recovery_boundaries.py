@@ -277,6 +277,69 @@ async def test_query_cannot_acknowledge_paused_submission_response():
     ] == ["intent"]
 
 
+@pytest.mark.parametrize("first_response", [1, 2])
+async def test_response_acknowledgement_is_scoped_to_its_submission_attempt(
+    first_response,
+):
+    from datetime import timedelta
+
+    from getpaid_core.durable import OperationIntent
+    from getpaid_core.durable import PaymentFacts
+
+    repository = InMemoryDurableRepository(
+        [
+            PaymentFacts(
+                "pay",
+                Decimal("100"),
+                remaining_authorization=Decimal("100"),
+                status="pre-auth",
+            )
+        ]
+    )
+    await repository.reserve_operation(
+        "pay", OperationIntent("intent", OperationType.CHARGE)
+    )
+    await repository.claim_submission(
+        "pay",
+        "intent",
+        expected_attempt=0,
+        now=NOW,
+        retry_until=NOW + timedelta(hours=1),
+        idempotency_scope="merchant",
+    )
+    await repository.claim_submission(
+        "pay", "intent", expected_attempt=1, now=NOW
+    )
+    await repository.apply_observation(
+        "pay",
+        PaymentObservation(
+            operation_id="intent",
+            outcome=OperationOutcome(OperationState.SUCCEEDED),
+        ),
+    )
+    second_response = 3 - first_response
+    first = await repository.record_operation_outcome(
+        "pay",
+        "intent",
+        OperationOutcome(OperationState.SUCCEEDED),
+        response_attempt=first_response,
+    )
+    assert first.operation.pending_response_attempts == (second_response,)
+    assert first.operation.response_pending
+    assert [
+        r.operation_id for r in await repository.list_unresolved_operations()
+    ] == ["intent"]
+    final = await repository.record_operation_outcome(
+        "pay",
+        "intent",
+        OperationOutcome(OperationState.SUCCEEDED),
+        response_attempt=second_response,
+    )
+    assert final.operation.pending_response_attempts == ()
+    assert not final.operation.response_pending
+    assert await repository.list_unresolved_operations() == ()
+
+
 async def test_flagged_terminal_operation_can_still_be_queried_without_resubmission():
     from getpaid_core.durable import LookupSemantics
     from getpaid_core.durable import OperationCapabilities

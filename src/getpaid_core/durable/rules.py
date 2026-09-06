@@ -740,7 +740,7 @@ def plan_submission(
                 state=OperationState.SUBMITTING,
                 submitted_at=now,
                 submission_attempts=1,
-                response_pending=True,
+                pending_response_attempts=(1,),
                 retry_until=retry_until,
                 idempotency_scope=idempotency_scope,
             ),
@@ -758,7 +758,10 @@ def plan_submission(
             operation,
             state=OperationState.SUBMITTING,
             submission_attempts=operation.submission_attempts + 1,
-            response_pending=True,
+            pending_response_attempts=(
+                *operation.pending_response_attempts,
+                operation.submission_attempts + 1,
+            ),
         ),
         granted=True,
     )
@@ -882,21 +885,32 @@ def plan_outcome(
     outcome: OperationOutcome,
     *,
     operations: Iterable[OperationRecord] = (),
-    submission_response: bool = False,
+    response_attempt: int | None = None,
 ) -> OutcomePlan:
     """Apply evidence; only a recorded response retires response-pending work.
 
-    Callbacks use the default: provider settlement does not prove the command
-    worker recorded its response. A command response or authoritative lookup
-    sets ``submission_response=True`` and commits that acknowledgement with
-    all planned state, including disputes. Failed commits clear nothing.
+    Callbacks and queries use None: provider settlement does not prove that a
+    submitting worker recorded its response. A command response acknowledges
+    only its own claimed attempt number, atomically with all planned state.
+    Failed commits clear nothing; another attempt's producer remains visible.
     """
-    if type(submission_response) is not bool:
-        raise InvalidTransitionError("submission_response must be boolean.")
+    if response_attempt is not None and (
+        type(response_attempt) is not int
+        or not 0 < response_attempt <= operation.submission_attempts
+    ):
+        raise InvalidTransitionError("Response must name a claimed attempt.")
     plan = _plan_outcome(facts, operation, outcome, operations=operations)
-    if submission_response:
+    if response_attempt is not None:
         plan = replace(
-            plan, operation=replace(plan.operation, response_pending=False)
+            plan,
+            operation=replace(
+                plan.operation,
+                pending_response_attempts=tuple(
+                    attempt
+                    for attempt in plan.operation.pending_response_attempts
+                    if attempt != response_attempt
+                ),
+            ),
         )
     return plan
 

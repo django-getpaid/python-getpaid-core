@@ -61,7 +61,7 @@ class ConformingRepository:
         operation_id: str,
         outcome: OperationOutcome,
         *,
-        submission_response: bool = False,
+        response_attempt: int | None = None,
     ) -> OutcomePlan:
         raise NotImplementedError
 

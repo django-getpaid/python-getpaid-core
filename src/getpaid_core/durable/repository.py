@@ -101,13 +101,13 @@ class DurablePaymentRepository(Protocol):
         operation_id: str,
         outcome: OperationOutcome,
         *,
-        submission_response: bool = False,
+        response_attempt: int | None = None,
     ) -> OutcomePlan:
         """Record an operation outcome and its financial effects.
 
-        Pass ``submission_response`` to ``plan_outcome``. Only command/query
-        response recording uses True; callbacks must leave it False so a
-        terminal callback cannot hide still-unrecorded response evidence.
+        Pass ``response_attempt`` to ``plan_outcome``. Only a submitting
+        worker acknowledges its own claimed attempt; queries/callbacks leave
+        None so they cannot hide another producer's unrecorded response.
 
         Returns the committed operation record together with the facts it
         settled and any related operations; all commit atomically, including

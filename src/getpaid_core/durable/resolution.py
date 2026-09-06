@@ -176,7 +176,7 @@ def plan_resolution(
     recorded = replace(
         plan.operation,
         resolutions=(*operation.resolutions, resolution),
-        response_pending=False,
+        pending_response_attempts=(),
     )
     facts = plan.facts
     if resolution.clear_payment_reconciliation:

@@ -71,11 +71,14 @@ Audit strings are printable, nonempty and at most 2000 characters. Application
 access control and evidence verification are mandatory integration responsibilities.
 The original exception chain and returned snapshot are not safe logging payloads.
 
-`OperationRecord.response_pending` defaults to False on new records and becomes
-True with each submission claim. Terminal callbacks preserve it; discovery includes
-it regardless of settlement. Only `record_operation_outcome(...,
-submission_response=True)` or audited resolution retires it atomically. Upgrading
-submitted records without proof of acknowledgement requires conservative True.
+`OperationRecord.pending_response_attempts` defaults to `()` and retains unique
+claimed attempt numbers awaiting response acknowledgement. `response_pending` is
+its derived boolean. Queries and terminal callbacks preserve all entries; discovery
+includes them regardless of settlement. `record_operation_outcome(...,
+response_attempt=N)` / `plan_outcome(..., response_attempt=N)` retire only that
+submitting worker's attempt; default None retires nothing. An audited resolution
+can retire all entries after the integration quiesces all producers. Upgrade records
+by conservatively retaining every claimed attempt lacking proven acknowledgement.
 
 `OperationRecord.recovery_evidence` and `.resolutions` default to immutable empty
 tuples. Preserve them on every write and during serialization. A repeated resolution

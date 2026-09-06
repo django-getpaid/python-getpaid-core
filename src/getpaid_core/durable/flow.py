@@ -232,7 +232,11 @@ class DurablePaymentFlow(BaseFlow):
                 operation.payment_id,
                 operation.operation_id,
                 outcome,
-                submission_response=submission_response,
+                response_attempt=(
+                    operation.submission_attempts
+                    if submission_response
+                    else None
+                ),
             )
         except (InvalidTransitionError, OperationConflictError) as exc:
             context["recovery_recorded"] = await self._retain_failure(

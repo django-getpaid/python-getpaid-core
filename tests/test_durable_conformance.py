@@ -28,7 +28,7 @@ async def test_suite_detects_callback_erasing_response_discovery():
         async def apply_observation(self, *args):
             plan = await super().apply_observation(*args)
             self._operations[plan.facts.payment_id] = [
-                replace(record, response_pending=False)
+                replace(record, pending_response_attempts=())
                 for record in self._operations[plan.facts.payment_id]
             ]
             return plan

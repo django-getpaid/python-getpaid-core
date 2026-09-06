@@ -28,8 +28,10 @@ mutating operations share the same safe recovery boundary. Errors carry normaliz
 provider evidence, payment/operation identity and the original local cause. A
 bounded local retention attempt preserves evidence without inventing settlement;
 if storage is unavailable, the earlier durable submission still makes the intent
-discoverable after restart. Its `response_pending` marker survives callback
-settlement until a command/query response or audited resolution commits. Never use an error as permission to replay the command.
+discoverable after restart. Its `pending_response_attempts` survive queries and
+callback settlement. Each submitting worker acknowledges only its own response;
+an audited resolution may retire remaining work after workers are quiescent.
+Never use an error as permission to replay the command.
 
 Applications query operations explicitly through `reconcile_operation` and discover
 work through repository lookup/list methods; core runs no scheduler. A provider's
@@ -316,7 +318,7 @@ class DurablePaymentRepository(Protocol):
     async def apply_observation(self, payment_id: str, update: PaymentUpdate | None) -> ObservationPlan: ...
     async def record_operation_outcome(
         self, payment_id: str, operation_id: str, outcome: OperationOutcome,
-        *, submission_response: bool = False,
+        *, response_attempt: int | None = None,
     ) -> OutcomePlan: ...
     async def record_operation_failure(
         self, payment_id: str, operation_id: str, evidence: RecoveryEvidence

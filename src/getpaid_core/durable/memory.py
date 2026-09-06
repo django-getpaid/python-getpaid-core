@@ -133,7 +133,7 @@ class InMemoryDurableRepository:
         operation_id: str,
         outcome: OperationOutcome,
         *,
-        submission_response: bool = False,
+        response_attempt: int | None = None,
     ) -> OutcomePlan:
         async with self._lock_for(payment_id):
             operations = self._operations.setdefault(payment_id, [])
@@ -143,7 +143,7 @@ class InMemoryDurableRepository:
                 operations[index],
                 outcome,
                 operations=operations,
-                submission_response=submission_response,
+                response_attempt=response_attempt,
             )
             replacements = {
                 record.operation_id: record

@@ -451,7 +451,7 @@ class OperationRecord:
     idempotency_key: str = field(init=False)
     submitted_at: datetime | None = None
     submission_attempts: int = 0
-    response_pending: bool = False
+    pending_response_attempts: tuple[int, ...] = ()
     retry_until: datetime | None = None
     idempotency_scope: str | None = None
     settled_amount: Decimal | None = None
@@ -466,8 +466,19 @@ class OperationRecord:
             self, "operation_type", OperationType(self.operation_type)
         )
         object.__setattr__(self, "state", OperationState(self.state))
-        if type(self.response_pending) is not bool:
-            raise InvalidTransitionError("response_pending must be boolean.")
+        if (
+            type(self.pending_response_attempts) is not tuple
+            or any(
+                type(attempt) is not int
+                or not 0 < attempt <= self.submission_attempts
+                for attempt in self.pending_response_attempts
+            )
+            or len(set(self.pending_response_attempts))
+            != len(self.pending_response_attempts)
+        ):
+            raise InvalidTransitionError(
+                "Pending response attempts must be unique claimed attempts."
+            )
         _validate_operation_id(self.operation_id)
         object.__setattr__(
             self, "parameters", freeze_parameters(self.parameters)
@@ -477,6 +488,11 @@ class OperationRecord:
             "idempotency_key",
             _request_digest([self.backend, self.payment_id, self.operation_id]),
         )
+
+    @property
+    def response_pending(self) -> bool:
+        """Whether any claimed submission still owes response recording."""
+        return bool(self.pending_response_attempts)
 
     @property
     def is_active(self) -> bool:

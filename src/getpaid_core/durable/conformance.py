@@ -590,6 +590,14 @@ async def check_callback_cannot_retire_response(
         "capture",
         expected_attempt=0,
         now=datetime(2026, 9, 6, tzinfo=UTC),
+        retry_until=datetime(2026, 9, 7, tzinfo=UTC),
+        idempotency_scope="merchant",
+    )
+    await repository.claim_submission(
+        PAYMENT_ID,
+        "capture",
+        expected_attempt=1,
+        now=datetime(2026, 9, 6, tzinfo=UTC),
     )
     await repository.apply_observation(
         PAYMENT_ID,
@@ -605,11 +613,30 @@ async def check_callback_cannot_retire_response(
         operation in await repository.list_unresolved_operations(),
         "terminal response work vanished from discovery",
     )
+    queried = await repository.record_operation_outcome(
+        PAYMENT_ID,
+        "capture",
+        OperationOutcome(OperationState.SUCCEEDED),
+    )
+    _require(
+        queried.operation.pending_response_attempts == (1, 2),
+        "query erased pending response producers",
+    )
+    first = await repository.record_operation_outcome(
+        PAYMENT_ID,
+        "capture",
+        OperationOutcome(OperationState.SUCCEEDED),
+        response_attempt=1,
+    )
+    _require(
+        first.operation.pending_response_attempts == (2,),
+        "response acknowledgement erased another producer",
+    )
     await repository.record_operation_outcome(
         PAYMENT_ID,
         "capture",
         OperationOutcome(OperationState.SUCCEEDED),
-        submission_response=True,
+        response_attempt=2,
     )
     _require(
         not await repository.list_unresolved_operations(),
