@@ -33,6 +33,9 @@ exercise.
 import asyncio
 from collections.abc import Awaitable
 from collections.abc import Callable
+from datetime import UTC
+from datetime import datetime
+from datetime import timedelta
 from decimal import Decimal
 from typing import Any
 from typing import cast
@@ -423,10 +426,44 @@ async def check_outstanding_operation_blocks_unrelated_commands(
     )
 
 
+async def check_submission_right_is_exclusive(factory: RepositoryFactory) -> None:
+    """Independent workers cannot both acquire the same submission attempt."""
+    repository = await factory(_authorized_facts())
+    intent = OperationIntent("submit-once", OperationType.CHARGE)
+    first, second = await asyncio.gather(
+        repository.reserve_operation(PAYMENT_ID, intent),
+        repository.reserve_operation(PAYMENT_ID, intent),
+    )
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    claims = await asyncio.gather(*(
+        repository.claim_submission(
+            PAYMENT_ID, record.operation_id,
+            expected_attempt=record.submission_attempts, now=now,
+            retry_until=now + timedelta(hours=1), idempotency_scope="conformance",
+        ) for record in (first, second)
+    ))
+    _require(sum(claim.granted for claim in claims) == 1,
+             "duplicate workers obtained independent submission rights")
+    stored = await repository.get_operation(PAYMENT_ID, "submit-once")
+    _require(stored is not None and stored.state is OperationState.SUBMITTING,
+             "submission was not durably marked before provider I/O")
+    _require(stored is not None and stored.submission_attempts == 1,
+             "submission attempt counter was not committed atomically")
+    expired = await repository.claim_submission(
+        PAYMENT_ID, "submit-once", expected_attempt=1,
+        now=now + timedelta(hours=2),
+    )
+    _require(not expired.granted, "expiry authorized blind resubmission")
+
+
 #: The checks an adapter must pass, in the order the suite runs them.
 CONFORMANCE_CHECKS: tuple[
     tuple[str, Callable[[RepositoryFactory], Awaitable[None]]], ...
 ] = (
+    (
+        "submission_right_is_exclusive",
+        check_submission_right_is_exclusive,
+    ),
     (
         "stale_capture_cannot_regress_funds",
         check_stale_capture_cannot_regress_funds,

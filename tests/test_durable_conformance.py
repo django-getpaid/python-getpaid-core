@@ -1,6 +1,7 @@
 """The reusable adapter conformance suite, and proof that it bites."""
 
 import asyncio
+from dataclasses import replace
 from decimal import Decimal
 
 import pytest
@@ -73,6 +74,7 @@ def test_the_suite_has_checks_for_every_required_race():
         "metadata_cannot_forge_replay_history",
         "malformed_metadata_is_rejected_atomically",
         "reconciliation_blocks_new_commands",
+        "submission_right_is_exclusive",
     }
 
 
@@ -87,6 +89,19 @@ async def test_stale_snapshot_repository_fails_the_conformance_suite():
     message = str(excinfo.value)
     assert "stale_capture_cannot_regress_funds" in message
     assert "captured funds regressed to 40.00" in message
+
+
+async def test_conformance_rejects_an_adapter_granting_duplicate_submission_rights():
+    class DuplicateClaims(InMemoryDurableRepository):
+        async def claim_submission(self, *args, **kwargs):
+            plan = await super().claim_submission(*args, **kwargs)
+            return replace(plan, granted=True)
+
+    async def factory(facts):
+        return DuplicateClaims([facts])
+
+    with pytest.raises(ConformanceError, match="submission_right_is_exclusive"):
+        await run_conformance_suite(factory)
 
 
 async def test_reference_repository_is_a_durable_repository():
