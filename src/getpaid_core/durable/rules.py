@@ -200,6 +200,13 @@ def _validate_observation(update: PaymentUpdate) -> None:
         update.provider_data, name="Observation metadata"
     )
     validate_event_identity(update.provider_event_id)
+    if (
+        update.payment_event is PaymentEvent.LOCKED
+        and update.locked_amount is None
+    ):
+        raise InvalidTransitionError(
+            "LOCKED event requires explicit locked_amount."
+        )
     for amount in (
         update.paid_amount,
         update.refunded_amount,

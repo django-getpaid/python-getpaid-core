@@ -14,6 +14,7 @@ from getpaid_core.durable import PaymentFacts
 from getpaid_core.durable import PaymentObservation
 from getpaid_core.enums import PaymentEvent
 from getpaid_core.enums import PaymentStatus
+from getpaid_core.exceptions import InvalidTransitionError
 from getpaid_core.types import PaymentUpdate
 
 
@@ -135,3 +136,30 @@ async def test_envelope_cannot_overwrite_established_operation_identity():
     assert plan.facts.observation_conflicts
     assert plan.operations[0].conflicting_outcomes
     assert plan.operations[0].state == OperationState.SUCCEEDED
+
+
+async def test_stale_capture_cannot_hide_a_lock_without_its_amount():
+    facts = PaymentFacts(
+        "payment",
+        Decimal("150"),
+        captured_funds=Decimal("100"),
+        status=PaymentStatus.PARTIAL,
+    )
+    repository = InMemoryDurableRepository([facts])
+    with pytest.raises(InvalidTransitionError, match="locked_amount"):
+        await repository.apply_observation(
+            "payment",
+            PaymentUpdate(
+                payment_event=PaymentEvent.LOCKED,
+                paid_amount=Decimal("80"),
+                provider_event_id="invalid-lock",
+            ),
+        )
+    assert await repository.get_payment_facts("payment") == facts
+    valid = await repository.apply_observation(
+        "payment",
+        PaymentUpdate(
+            paid_amount=Decimal("80"), provider_event_id="invalid-lock"
+        ),
+    )
+    assert valid.applied
