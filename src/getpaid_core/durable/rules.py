@@ -355,14 +355,15 @@ def plan_observation(
     operations = tuple(operations)
     changed: tuple[OperationRecord, ...] = ()
     aggregate = update
-    if isinstance(update, PaymentObservation) and update.outcome is not None:
-        # Operation lifecycle is resolved by correlated evidence below, not a
-        # payment-wide request label that could reopen a completed operation.
-        if update.payment_event not in {
-            PaymentEvent.FAILED,
-            PaymentEvent.LOCKED,
-        }:
-            aggregate = replace(update, payment_event=None)
+    # Operation lifecycle is resolved by correlated evidence below, not a
+    # payment-wide request label that could reopen a completed operation.
+    if (
+        isinstance(update, PaymentObservation)
+        and update.outcome is not None
+        and update.payment_event
+        not in {PaymentEvent.FAILED, PaymentEvent.LOCKED}
+    ):
+        aggregate = replace(update, payment_event=None)
     if isinstance(update, PaymentObservation) and update.delta_only:
         aggregate = replace(
             update,
