@@ -358,14 +358,22 @@ def plan_observation(
     if isinstance(update, PaymentObservation) and update.outcome is not None:
         # Operation lifecycle is resolved by correlated evidence below, not a
         # payment-wide request label that could reopen a completed operation.
-        aggregate = replace(update, payment_event=None)
+        if update.payment_event not in {
+            PaymentEvent.FAILED,
+            PaymentEvent.LOCKED,
+        }:
+            aggregate = replace(update, payment_event=None)
     if isinstance(update, PaymentObservation) and update.delta_only:
         aggregate = replace(
             update,
             paid_amount=None,
             refunded_amount=None,
             locked_amount=None,
-            payment_event=None,
+            payment_event=(
+                update.payment_event
+                if update.payment_event is PaymentEvent.FAILED
+                else None
+            ),
         )
         if update.outcome is None:
             facts = _retain_observation(facts, update, "unresolved_delta")

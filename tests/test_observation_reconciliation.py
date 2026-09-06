@@ -587,3 +587,32 @@ def test_replay_identity_preserves_precise_amounts_under_decimal_context():
         )
     assert first != changed
     assert first == equal
+
+
+async def test_correlated_outcome_does_not_hide_impossible_lifecycle_event():
+    facts = PaymentFacts(
+        "payment",
+        Decimal("100"),
+        captured_funds=Decimal("100"),
+        status=PaymentStatus.PAID,
+    )
+    repository = InMemoryDurableRepository([facts])
+    await repository.reserve_operation(
+        "payment",
+        OperationIntent("refund", OperationType.START_REFUND, Decimal("30")),
+    )
+    with pytest.raises(InvalidTransitionError, match="fail"):
+        await repository.apply_observation(
+            "payment",
+            PaymentObservation(
+                payment_event=PaymentEvent.FAILED,
+                operation_id="refund",
+                outcome=OperationOutcome(OperationState.PROVIDER_PENDING),
+            ),
+        )
+    assert (
+        await repository.get_payment_facts("payment")
+    ).captured_funds == Decimal("100")
+    assert (
+        await repository.get_operation("payment", "refund")
+    ).state == OperationState.RESERVED
