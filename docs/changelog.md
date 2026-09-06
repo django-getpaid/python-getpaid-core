@@ -4,6 +4,13 @@
 
 ### Breaking Changes
 
+- **Conflicting operation evidence is retained**: adapters must persist and
+  return `OperationRecord.conflicting_outcomes` atomically with operation and
+  payment reconciliation flags. Distinct normalized disputed amounts, states
+  and handles remain recoverable without changing established financial facts;
+  repeated identical disputes do not grow the record. No raw provider payloads
+  are retained. The adapter conformance suite now checks this storage contract.
+
 - **Durable intent dispatch**: `DurablePaymentFlow.execute_operation()` now
   covers prepare, capture, release, refund and targeted refund cancellation.
   Application-supplied IDs bind immutable normalized parameters; same-ID retries

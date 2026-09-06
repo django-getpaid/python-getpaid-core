@@ -95,8 +95,10 @@ class DurablePaymentRepository(Protocol):
         """Record an operation outcome and its financial effects.
 
         Returns the committed operation record together with the facts it
-        settled and any related operations; all commit atomically. Load
-        the payment's complete retained operation history for ``plan_outcome``
+        settled and any related operations; all commit atomically, including
+        ``conflicting_outcomes`` and reconciliation flags when evidence
+        contradicts established facts. Never discard that tuple on later writes.
+        Load the payment's complete retained history for ``plan_outcome``
         so a cancellation can resolve its target, refund status reflects
         outstanding work, and confirmed refunds with overlapping reservation
         baselines are counted. Passing only active records is insufficient.

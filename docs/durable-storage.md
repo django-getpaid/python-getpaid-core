@@ -52,6 +52,35 @@ through the operation list. Between the two, a restarted process finds
 its outstanding work from stored state, without an exception, a log line
 or a caller object.
 
+### Conflicting operation evidence
+
+`OperationRecord.conflicting_outcomes` is a tuple of normalized
+`OperationOutcome` values, empty by default. When an otherwise valid outcome
+contradicts an established terminal state/amount, operation correlation, or
+payment external ID, `plan_outcome` retains its allowlisted fields: `state`,
+`settled_amount`, `correlation`, `external_id`, and `reconciliation_required`.
+It stores neither raw provider payloads nor additional plugin attributes.
+An omitted settled amount retains its meaning against the frozen reservation.
+
+Commit this tuple with the operation, payment facts and reconciliation flags
+in the same `record_operation_outcome()` boundary. Distinct disputed values
+must survive subsequent writes and concurrent callers; equal normalized
+outcomes are retained only once. Reading `get_operation()` or enumerating
+`list_unresolved_operations()` must recover the evidence, not merely its flag.
+Disputes do not overwrite established money or handles. The existing correlated
+refund-settlement-after-cancellation rule still records confirmed returned
+funds while retaining the contradiction for reconciliation.
+
+This extends the unreleased next-major storage contract. Adapters must round-trip
+all five evidence fields and preserve the tuple on every operation write. Records
+created before this field existed may default it to `()`, but previously discarded
+evidence cannot be reconstructed that way. Upgrade storage/readers before enabling
+these writers; older writers must not erase the new field. Core never silently
+expires or truncates disputes; evidence archival requires an explicit integration
+retention policy, separate from provider idempotency windows. The conformance suite
+checks retention, redelivery and unchanged financial facts against adapter storage;
+it does not certify real database isolation or a provider.
+
 ## Optional, adapter-owned choices
 
 Everything below is the adapter's decision, and core prescribes none of
