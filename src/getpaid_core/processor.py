@@ -39,7 +39,9 @@ class BaseProcessor(ABC):
         self.payment = payment
         self.config = dict(config or {})
 
-    operation_capabilities: ClassVar[Mapping["OperationType", "OperationCapabilities"]] = {}
+    operation_capabilities: ClassVar[
+        Mapping["OperationType", "OperationCapabilities"]
+    ] = {}
 
     @classmethod
     async def submit_operation(
@@ -51,8 +53,8 @@ class BaseProcessor(ABC):
         All request-specific inputs must come from the reservation, including
         provider correlation for a targeted cancellation. Config supplies only
         deployment settings/credentials, whose provider account must stay stable
-        throughout an intent's lifetime. Never read current balances to construct
-        a retry payload. Return normalized acceptance/settlement evidence;
+        throughout an intent's lifetime. Never read current balances to
+        construct a retry payload. Return normalized acceptance/settlement evidence;
         communication uncertainty is not rejection.
         """
         raise NotImplementedError

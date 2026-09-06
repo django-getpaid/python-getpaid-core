@@ -42,12 +42,24 @@ class OperationCapabilities:
     lookup_semantics: LookupSemantics = LookupSemantics.UNSUPPORTED
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "lookup_semantics", LookupSemantics(self.lookup_semantics))
-        if (self.idempotency_scope is None) != (self.idempotency_window is None):
-            raise ValueError("Idempotency requires both a key scope and a validity window.")
-        if self.idempotency_scope is not None and not self.idempotency_scope.strip():
+        object.__setattr__(
+            self, "lookup_semantics", LookupSemantics(self.lookup_semantics)
+        )
+        if (self.idempotency_scope is None) != (
+            self.idempotency_window is None
+        ):
+            raise ValueError(
+                "Idempotency requires both a key scope and a validity window."
+            )
+        if (
+            self.idempotency_scope is not None
+            and not self.idempotency_scope.strip()
+        ):
             raise ValueError("Idempotency key scope must not be empty.")
-        if self.idempotency_window is not None and self.idempotency_window <= timedelta(0):
+        if (
+            self.idempotency_window is not None
+            and self.idempotency_window <= timedelta(0)
+        ):
             raise ValueError("Idempotency validity window must be positive.")
 
 
@@ -73,4 +85,7 @@ class OperationResult:
 
     @property
     def reconciliation_required(self) -> bool:
-        return self.operation.reconciliation_required or self.snapshot.reconciliation_required
+        return (
+            self.operation.reconciliation_required
+            or self.snapshot.reconciliation_required
+        )
