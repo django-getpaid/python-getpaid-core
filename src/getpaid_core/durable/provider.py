@@ -66,6 +66,16 @@ class OperationCapabilities:
 
 
 @dataclass(frozen=True, slots=True)
+class OperationNotFound:
+    """An operation query found no record; the capability defines its meaning.
+
+    This is not a rejection. Only AUTHORITATIVE_INCLUDING_ABSENCE proves the
+    intent neither executed nor can execute later. Other lookup contracts
+    leave it UNKNOWN; elapsed time is irrelevant.
+    """
+
+
+@dataclass(frozen=True, slots=True)
 class OperationResult:
     """A durable operation's outcome, never an implication of settlement.
 

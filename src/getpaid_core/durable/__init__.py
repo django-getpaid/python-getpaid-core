@@ -21,6 +21,7 @@ from getpaid_core.durable.migration import MigrationPlan
 from getpaid_core.durable.migration import plan_migration
 from getpaid_core.durable.provider import LookupSemantics
 from getpaid_core.durable.provider import OperationCapabilities
+from getpaid_core.durable.provider import OperationNotFound
 from getpaid_core.durable.provider import OperationResult
 from getpaid_core.durable.records import ACTIVE_OPERATION_STATES
 from getpaid_core.durable.records import CANCELLATION_TARGET
@@ -76,6 +77,7 @@ __all__ = [
     "ObservationPlan",
     "OperationCapabilities",
     "OperationIntent",
+    "OperationNotFound",
     "OperationOutcome",
     "OperationRecord",
     "OperationResult",

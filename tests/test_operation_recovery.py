@@ -174,6 +174,45 @@ async def test_result_repr_excludes_metadata_and_frozen_provider_parameters():
     assert result.evidence.state is OperationState.PROVIDER_PENDING
 
 
+@pytest.mark.parametrize("conclusive", [False, True])
+async def test_not_found_requires_a_conclusive_provider_contract(conclusive):
+    from getpaid_core.durable import LookupSemantics
+    from getpaid_core.durable import OperationNotFound
+
+    class Lookup(MockProcessor):
+        operation_capabilities = {
+            OperationType.CHARGE: OperationCapabilities(
+                lookup_semantics=(
+                    LookupSemantics.AUTHORITATIVE_INCLUDING_ABSENCE
+                    if conclusive
+                    else LookupSemantics.AUTHORITATIVE
+                )
+            )
+        }
+
+        @classmethod
+        async def submit_operation(cls, operation, *, config):
+            return OperationOutcome(OperationState.UNKNOWN)
+
+        @classmethod
+        async def lookup_operation(cls, operation, *, config):
+            return OperationNotFound()
+
+    repository, flow = make_flow(Lookup)
+    await flow.execute_operation(
+        "pay", OperationIntent("intent", OperationType.CHARGE), now=NOW
+    )
+    result = await flow.reconcile_operation(
+        "pay", "intent", now=NOW, resubmit=True
+    )
+    assert result.outcome is (
+        OperationState.REJECTED if conclusive else OperationState.UNKNOWN
+    )
+    assert result.snapshot.captured_funds == 0
+    assert result.operation.submission_attempts == 1
+    assert bool(await repository.list_unresolved_operations()) is not conclusive
+
+
 async def test_operator_resolution_commits_audit_with_settlement_and_no_submission():
     from getpaid_core.durable import OperatorResolution
 

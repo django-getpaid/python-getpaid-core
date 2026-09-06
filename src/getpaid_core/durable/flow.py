@@ -31,6 +31,7 @@ from getpaid_core.durable.evidence import normalize_outcome
 from getpaid_core.durable.evidence import safe_handle
 from getpaid_core.durable.provider import LookupSemantics
 from getpaid_core.durable.provider import OperationCapabilities
+from getpaid_core.durable.provider import OperationNotFound
 from getpaid_core.durable.provider import OperationResult
 from getpaid_core.durable.records import ObservationPlan
 from getpaid_core.durable.records import OperationIntent
@@ -206,7 +207,7 @@ class DurablePaymentFlow(BaseFlow):
         return await self._record_evidence(operation, outcome)
 
     async def _record_evidence(
-        self, operation: OperationRecord, outcome: OperationOutcome
+        self, operation: OperationRecord, outcome: object
     ) -> OperationResult:
         evidence = RecoveryEvidence.from_outcome(outcome)
         context: dict[str, object] = {
@@ -330,6 +331,13 @@ class DurablePaymentFlow(BaseFlow):
             except (TimeoutError, CommunicationError):
                 # A failed query cannot erase previously established acceptance.
                 return await self._operation_result(operation)
+            if type(outcome) is OperationNotFound:
+                outcome = OperationOutcome(
+                    OperationState.REJECTED
+                    if capability.lookup_semantics
+                    is LookupSemantics.AUTHORITATIVE_INCLUDING_ABSENCE
+                    else OperationState.UNKNOWN
+                )
             result = await self._record_evidence(operation, outcome)
             operation = result.operation
         result = await self._operation_result(operation)
