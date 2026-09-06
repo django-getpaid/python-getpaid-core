@@ -375,7 +375,10 @@ class OperationRecord:
     Starting totals and recursively frozen ``parameters`` describe the
     reserved request, not the payment at response time. ``idempotency_key``
     derives from the backend/payment/operation identity, independent of
-    attempt count. Submission time, scope and retry deadline are frozen by
+    attempt count. ``reservation_sequence`` orders intents within the payment
+    independently of clocks, proving which later intents cannot already be
+    included in a reservation's starting totals. Preserve it in storage.
+    Submission time, scope and retry deadline are frozen by
     the first claim. ``settled_amount`` retains confirmed operation-specific
     money for detecting contradictory terminal evidence.
     """
@@ -391,6 +394,7 @@ class OperationRecord:
     parameters: Mapping[str, Any] = field(default=EMPTY_METADATA)
     starting_authorization: Decimal = Decimal("0")
     backend: str = ""
+    reservation_sequence: int = 0
     idempotency_key: str = field(init=False)
     submitted_at: datetime | None = None
     submission_attempts: int = 0

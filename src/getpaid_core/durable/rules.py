@@ -343,6 +343,9 @@ def plan_reservation(
             starting_authorization=facts.remaining_authorization,
             parameters=parameters,
             backend=facts.backend,
+            reservation_sequence=max(
+                (record.reservation_sequence for record in operations), default=0
+            ) + 1,
         ),
         created=True,
         facts=(
@@ -474,14 +477,14 @@ def _confirmed_refund_total(
     settled: Decimal,
     operations: Iterable[OperationRecord],
 ) -> Decimal:
-    """A cumulative lower bound proved by distinct confirmed refund intents.
+    """Combine each reserved baseline with independently proven later refunds.
 
-    A cancelled refund can settle after a later refund reserved the same
-    starting balance. Their per-intent cumulative baselines overlap, but their
-    confirmed returned funds do not. Count each durable intent once above the
-    earliest reserved baseline. Compare this with observations, never add it
-    to current facts: a callback may already contain the same returned money.
-    The complete retained operation history is required for this proof.
+    An intent cannot have settled before its reservation existed. Thus each
+    starting total plus confirmed refunds reserved at/after that point is a
+    cumulative lower bound. Taking the greatest bound preserves historical
+    observations between older and newer intents, without counting a callback
+    twice. Do not add the result to current facts. The complete retained history
+    and atomically assigned reservation sequences are required for this proof.
     """
     refunds = [
         record
@@ -490,23 +493,18 @@ def _confirmed_refund_total(
         and record.operation_type is OperationType.START_REFUND
         and record.operation_id != operation.operation_id
     ]
-    baseline = min(
-        (record.starting_refunded for record in refunds),
-        default=operation.starting_refunded,
-    )
-    baseline = min(baseline, operation.starting_refunded)
-    confirmed = sum(
-        (
-            record.settled_amount
-            for record in refunds
-            if record.state is OperationState.SUCCEEDED
-            and record.settled_amount is not None
-        ),
-        start=Decimal("0"),
-    )
-    return max(
-        operation.starting_refunded + settled, baseline + confirmed + settled
-    )
+    refunds.append(replace(
+        operation, state=OperationState.SUCCEEDED, settled_amount=settled
+    ))
+    confirmed = Decimal("0")
+    cumulative = Decimal("0")
+    for record in sorted(
+        refunds, key=lambda record: record.reservation_sequence, reverse=True
+    ):
+        if record.state is OperationState.SUCCEEDED and record.settled_amount is not None:
+            confirmed += record.settled_amount
+        cumulative = max(cumulative, record.starting_refunded + confirmed)
+    return cumulative
 
 
 def plan_outcome(
