@@ -16,6 +16,7 @@ from typing import Any
 from typing import cast
 
 from getpaid_core._amounts import validate_amount
+from getpaid_core.durable.records import CANCELLATION_CORRELATION
 from getpaid_core.durable.records import CANCELLATION_TARGET
 from getpaid_core.durable.records import TERMINAL_OPERATION_STATES
 from getpaid_core.durable.records import ObservationPlan
@@ -218,6 +219,8 @@ def _blocking_operation(
         if (
             intent.operation_type is OperationType.CANCEL_REFUND
             and record.operation_id == target
+            and record.operation_type is OperationType.START_REFUND
+            and record.state is OperationState.PROVIDER_PENDING
         ):
             continue
         return record
@@ -226,22 +229,24 @@ def _blocking_operation(
 
 def _require_cancellation_target(
     operations: Iterable[OperationRecord], intent: OperationIntent
-) -> None:
-    """Refuse a cancellation that does not name an outstanding refund."""
+) -> OperationRecord:
+    """Require a specific provider-pending refund with useful correlation."""
     target = intent.parameters.get(CANCELLATION_TARGET)
-    matched = any(
-        record.operation_id == target
-        and record.operation_type is OperationType.START_REFUND
-        and record.is_active
-        for record in operations
+    for record in operations:
+        if (
+            record.operation_id == target
+            and record.operation_type is OperationType.START_REFUND
+            and record.state is OperationState.PROVIDER_PENDING
+            and isinstance(record.correlation, str)
+            and record.correlation.strip()
+        ):
+            return record
+    raise OperationConflictError(
+        "A refund cancellation must name the correlated provider-pending "
+        f"refund through parameters[{CANCELLATION_TARGET!r}]; "
+        f"{target!r} is not a cancellable refund.",
+        context={"operation_id": intent.operation_id, "target": target},
     )
-    if not matched:
-        raise OperationConflictError(
-            "A refund cancellation must name the pending refund it cancels "
-            f"through parameters[{CANCELLATION_TARGET!r}]; "
-            f"{target!r} is not an outstanding refund.",
-            context={"operation_id": intent.operation_id, "target": target},
-        )
 
 
 def plan_reservation(
@@ -294,8 +299,10 @@ def plan_reservation(
             },
         )
 
+    parameters = dict(intent.parameters)
     if intent.operation_type is OperationType.CANCEL_REFUND:
-        _require_cancellation_target(operations, intent)
+        target = _require_cancellation_target(operations, intent)
+        parameters[CANCELLATION_CORRELATION] = target.correlation
 
     blocker = _blocking_operation(operations, intent)
     if blocker is not None:
@@ -321,7 +328,7 @@ def plan_reservation(
             starting_captured=facts.captured_funds,
             starting_refunded=facts.refunded_funds,
             starting_authorization=facts.remaining_authorization,
-            parameters=intent.parameters,
+            parameters=parameters,
             backend=facts.backend,
         ),
         created=True,

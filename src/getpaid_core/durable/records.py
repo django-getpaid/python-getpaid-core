@@ -165,6 +165,8 @@ def _validate_operation_id(operation_id: str) -> None:
 
 #: Parameter naming the pending refund a cancellation targets.
 CANCELLATION_TARGET = "target_operation_id"
+#: Provider handle frozen from the target, never trusted from caller input.
+CANCELLATION_CORRELATION = "target_correlation"
 
 
 class OperationType(StrEnum):

@@ -10,6 +10,7 @@ from decimal import Decimal
 import pytest
 
 from getpaid_core.durable.memory import InMemoryDurableRepository
+from getpaid_core.durable.records import CANCELLATION_TARGET
 from getpaid_core.durable.records import OperationIntent
 from getpaid_core.durable.records import OperationOutcome
 from getpaid_core.durable.records import OperationState
@@ -19,6 +20,7 @@ from getpaid_core.durable.rules import plan_outcome
 from getpaid_core.durable.rules import plan_reservation
 from getpaid_core.enums import PaymentStatus
 from getpaid_core.exceptions import InvalidTransitionError
+from getpaid_core.exceptions import OperationConflictError
 
 
 def authorized_facts(**overrides):
@@ -241,3 +243,45 @@ async def test_pending_prepare_persists_handle_and_late_success_preserves_callba
     )
     assert conflict.facts.external_id == "order-1"
     assert conflict.facts.reconciliation_required
+
+
+@pytest.mark.parametrize(
+    "state, correlation, allowed",
+    [
+        (OperationState.RESERVED, "refund-handle", False),
+        (OperationState.SUBMITTING, "refund-handle", False),
+        (OperationState.UNKNOWN, "refund-handle", False),
+        (OperationState.PROVIDER_PENDING, None, False),
+        (OperationState.PROVIDER_PENDING, "", False),
+        (OperationState.PROVIDER_PENDING, "refund-handle", True),
+    ],
+)
+def test_cancellation_only_reserves_correlated_provider_pending_refund(
+    state, correlation, allowed
+):
+    facts = authorized_facts(
+        captured_funds=Decimal("100"),
+        remaining_authorization=Decimal("0"),
+        status=PaymentStatus.PAID,
+    )
+    refund = plan_reservation(
+        facts, (), OperationIntent("refund-1", OperationType.START_REFUND)
+    ).operation
+    refund = replace(refund, state=state, correlation=correlation)
+    intent = OperationIntent(
+        "cancel-1",
+        OperationType.CANCEL_REFUND,
+        parameters={CANCELLATION_TARGET: "refund-1"},
+    )
+    if not allowed:
+        with pytest.raises(OperationConflictError):
+            plan_reservation(facts, (refund,), intent)
+        return
+    cancellation = plan_reservation(facts, (refund,), intent).operation
+    assert cancellation.parameters[CANCELLATION_TARGET] == "refund-1"
+    assert cancellation.parameters["target_correlation"] == "refund-handle"
+    assert cancellation.parameters_digest == intent.parameters_digest
+    assert (
+        plan_reservation(facts, (refund, cancellation), intent).operation
+        == cancellation
+    )
