@@ -344,8 +344,10 @@ def plan_reservation(
             parameters=parameters,
             backend=facts.backend,
             reservation_sequence=max(
-                (record.reservation_sequence for record in operations), default=0
-            ) + 1,
+                (record.reservation_sequence for record in operations),
+                default=0,
+            )
+            + 1,
         ),
         created=True,
         facts=(
@@ -493,15 +495,20 @@ def _confirmed_refund_total(
         and record.operation_type is OperationType.START_REFUND
         and record.operation_id != operation.operation_id
     ]
-    refunds.append(replace(
-        operation, state=OperationState.SUCCEEDED, settled_amount=settled
-    ))
+    refunds.append(
+        replace(
+            operation, state=OperationState.SUCCEEDED, settled_amount=settled
+        )
+    )
     confirmed = Decimal("0")
     cumulative = Decimal("0")
     for record in sorted(
         refunds, key=lambda record: record.reservation_sequence, reverse=True
     ):
-        if record.state is OperationState.SUCCEEDED and record.settled_amount is not None:
+        if (
+            record.state is OperationState.SUCCEEDED
+            and record.settled_amount is not None
+        ):
             confirmed += record.settled_amount
         cumulative = max(cumulative, record.starting_refunded + confirmed)
     return cumulative

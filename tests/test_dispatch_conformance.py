@@ -577,11 +577,15 @@ async def test_crash_after_claim_before_transmission_cannot_be_blindly_retried(
     assert len(await repository.list_unresolved_operations()) == 1
 
 
-@pytest.mark.parametrize("historical_refunded,earlier_outcome", [
-    (Decimal("0"), None), (Decimal("20"), None),
-    (Decimal("20"), OperationState.REJECTED),
-    (Decimal("20"), OperationState.SUCCEEDED),
-])
+@pytest.mark.parametrize(
+    "historical_refunded,earlier_outcome",
+    [
+        (Decimal("0"), None),
+        (Decimal("20"), None),
+        (Decimal("20"), OperationState.REJECTED),
+        (Decimal("20"), OperationState.SUCCEEDED),
+    ],
+)
 @pytest.mark.parametrize("late_first", [False, True])
 @pytest.mark.parametrize("callback_before_response", [False, True])
 async def test_late_cancelled_refund_and_distinct_refund_are_both_counted(
@@ -594,20 +598,34 @@ async def test_late_cancelled_refund_and_distinct_refund_are_both_counted(
                 Decimal("100"),
                 backend=MockProcessor.slug,
                 captured_funds=Decimal("100"),
-                refunded_funds=Decimal("0") if earlier_outcome else historical_refunded,
-                status="paid" if earlier_outcome or not historical_refunded else "partially_refunded",
+                refunded_funds=Decimal("0")
+                if earlier_outcome
+                else historical_refunded,
+                status="paid"
+                if earlier_outcome or not historical_refunded
+                else "partially_refunded",
             )
         ]
     )
     if earlier_outcome is not None:
-        await repository.reserve_operation("payment", OperationIntent(
-            "old", OperationType.START_REFUND, amount=Decimal("10")))
-        await repository.record_operation_outcome("payment", "old", OperationOutcome(
-            earlier_outcome, correlation="old-refund"))
-        await repository.apply_observation("payment", PaymentUpdate(
-            payment_event=PaymentEvent.REFUND_CONFIRMED,
-            refunded_amount=historical_refunded,
-        ))
+        await repository.reserve_operation(
+            "payment",
+            OperationIntent(
+                "old", OperationType.START_REFUND, amount=Decimal("10")
+            ),
+        )
+        await repository.record_operation_outcome(
+            "payment",
+            "old",
+            OperationOutcome(earlier_outcome, correlation="old-refund"),
+        )
+        await repository.apply_observation(
+            "payment",
+            PaymentUpdate(
+                payment_event=PaymentEvent.REFUND_CONFIRMED,
+                refunded_amount=historical_refunded,
+            ),
+        )
     await repository.reserve_operation(
         "payment",
         OperationIntent("r1", OperationType.START_REFUND, amount=Decimal("30")),

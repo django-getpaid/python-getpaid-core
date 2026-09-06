@@ -136,10 +136,13 @@ not distinguish otherwise identical requests.
 
 Reservation preserves the starting captured/refunded/authorization totals,
 concrete amount, normalized parameters, provider backend and operation-specific
-idempotency key. The submission claim freezes the first submission time, key
+idempotency key. It atomically assigns `reservation_sequence`, an increasing
+per-payment ordinal independent of worker clocks. Retain this ordinal with the
+complete operation history; do not reconstruct it from settlement timestamps. The submission claim freezes the first submission time, key
 scope and finite retry deadline. Adapters must persist **all** these fields,
 not only the request digest. An older experimental durable record missing its
-payload or submission history cannot be reconstructed by guessing: reconcile
+payload, reservation sequence or submission history cannot be reconstructed by
+guessing: reconcile
 it before enabling dispatch. Released 3.x migration still invents no intents.
 
 One active intent holds a payment in `RESERVED`, `SUBMITTING`,
@@ -241,8 +244,10 @@ remain blocked while either operation is uncertain. Confirmed cancellation
 resolves the unexecuted target without decreasing refunded funds; a racing
 settlement is preserved, not overwritten. A callback completing an operation
 before a late acceptance response cannot downgrade terminal state. Confirmed
-refund intents also establish a cumulative lower bound above their earliest
-reserved baseline. This preserves separately completed refunds when an older
+refund intents also establish cumulative lower bounds: each reserved starting
+total plus confirmed refunds reserved at or after that sequence. Take the greatest
+bound, so older history cannot discard intervening financial observations.
+This preserves separately completed refunds when an older
 cancelled refund settles late, without adding request amounts to callback-updated
 facts. Retain and supply the complete operation history for that calculation.
 Unknown external contributions still require trustworthy cumulative evidence;
