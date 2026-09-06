@@ -9,9 +9,12 @@ funds and remaining authorization are separate facts, and an operation
 intent is distinct from the attempts made to submit it.
 """
 
+import json
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from dataclasses import field
+from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 from hashlib import sha256
@@ -97,12 +100,67 @@ def _canonical_amount(amount: Decimal | None) -> str:
     return format(amount.normalize(), "f")
 
 
-def _canonical_parameter(value: Any) -> str:
-    """Render a request parameter so a changed type is a changed value."""
-    rendered = (
-        _canonical_amount(value) if isinstance(value, Decimal) else str(value)
+def _canonical_parameter(value: Any) -> Any:
+    """Build an unambiguous typed tree, with unordered mapping semantics."""
+    if isinstance(value, Mapping):
+        validate_provider_metadata(value, name="Operation parameters")
+        return [
+            "mapping",
+            [[key, _canonical_parameter(value[key])] for key in sorted(value)],
+        ]
+    if isinstance(value, (list, tuple)):
+        return ["sequence", [_canonical_parameter(item) for item in value]]
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            raise InvalidTransitionError("Operation parameters must be finite.")
+        # Avoid normalize(): it rounds through the current Decimal context.
+        rendered = format(value, "f")
+        if "." in rendered:
+            rendered = rendered.rstrip("0").rstrip(".")
+        return ["decimal", "0" if value == 0 else rendered]
+    if value is None or type(value) in (str, bool, int):
+        return [type(value).__name__, value]
+    if type(value) is float and math.isfinite(value):
+        return ["float", value]
+    raise InvalidTransitionError(
+        f"Unsupported or nonfinite operation parameter: {type(value).__name__}."
     )
-    return f"{type(value).__name__}:{rendered}"
+
+
+def _freeze_parameter(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {key: _freeze_parameter(item) for key, item in value.items()}
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_parameter(item) for item in value)
+    return value
+
+
+def freeze_parameters(parameters: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Validate and recursively copy a normalized immutable request."""
+    validate_provider_metadata(parameters, name="Operation parameters")
+    try:
+        _canonical_parameter(parameters)
+        return _freeze_parameter(parameters)
+    except RecursionError as exc:
+        raise InvalidTransitionError(
+            "Operation parameters must be finite, acyclic values."
+        ) from exc
+
+
+def _request_digest(value: Any) -> str:
+    encoded = json.dumps(
+        _canonical_parameter(value), ensure_ascii=True, separators=(",", ":")
+    )
+    return sha256(encoded.encode()).hexdigest()
+
+
+def _validate_operation_id(operation_id: str) -> None:
+    if not isinstance(operation_id, str) or not operation_id.strip():
+        raise InvalidTransitionError(
+            "An operation ID must be a nonempty string."
+        )
 
 
 #: Parameter naming the pending refund a cancellation targets.
@@ -284,7 +342,16 @@ class OperationIntent:
         object.__setattr__(
             self, "operation_type", OperationType(self.operation_type)
         )
-        object.__setattr__(self, "parameters", freeze_metadata(self.parameters))
+        _validate_operation_id(self.operation_id)
+        if self.amount is not None and (
+            not isinstance(self.amount, Decimal) or not self.amount.is_finite()
+        ):
+            raise InvalidTransitionError(
+                "Operation amount must be a finite Decimal."
+            )
+        object.__setattr__(
+            self, "parameters", freeze_parameters(self.parameters)
+        )
 
     @property
     def parameters_digest(self) -> str:
@@ -294,16 +361,9 @@ class OperationIntent:
         from ``Decimal("100")`` to ``"100"`` -- or from ``True`` to
         ``"True"`` -- reads as a changed intent rather than a retry.
         """
-        items = sorted(
-            (key, _canonical_parameter(value))
-            for key, value in self.parameters.items()
+        return _request_digest(
+            [str(self.operation_type), self.amount, self.parameters]
         )
-        parts = [
-            str(self.operation_type),
-            _canonical_amount(self.amount),
-            *(f"{key}={value}" for key, value in items),
-        ]
-        return sha256("\x1f".join(parts).encode()).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -324,6 +384,14 @@ class OperationRecord:
     parameters_digest: str
     starting_captured: Decimal
     starting_refunded: Decimal
+    parameters: Mapping[str, Any] = field(default=EMPTY_METADATA)
+    starting_authorization: Decimal = Decimal("0")
+    backend: str = ""
+    idempotency_key: str = field(init=False)
+    submitted_at: datetime | None = None
+    submission_attempts: int = 0
+    retry_until: datetime | None = None
+    idempotency_scope: str | None = None
     correlation: str | None = None
     reconciliation_required: bool = False
 
@@ -332,6 +400,15 @@ class OperationRecord:
             self, "operation_type", OperationType(self.operation_type)
         )
         object.__setattr__(self, "state", OperationState(self.state))
+        _validate_operation_id(self.operation_id)
+        object.__setattr__(
+            self, "parameters", freeze_parameters(self.parameters)
+        )
+        object.__setattr__(
+            self,
+            "idempotency_key",
+            _request_digest([self.backend, self.payment_id, self.operation_id]),
+        )
 
     @property
     def is_active(self) -> bool:

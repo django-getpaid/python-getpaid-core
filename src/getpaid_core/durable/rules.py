@@ -317,6 +317,9 @@ def plan_reservation(
             parameters_digest=digest,
             starting_captured=facts.captured_funds,
             starting_refunded=facts.refunded_funds,
+            starting_authorization=facts.remaining_authorization,
+            parameters=intent.parameters,
+            backend=facts.backend,
         ),
         created=True,
     )
