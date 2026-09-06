@@ -207,7 +207,11 @@ class DurablePaymentFlow(BaseFlow):
         return await self._record_evidence(operation, outcome)
 
     async def _record_evidence(
-        self, operation: OperationRecord, outcome: object
+        self,
+        operation: OperationRecord,
+        outcome: object,
+        *,
+        submission_response: bool = True,
     ) -> OperationResult:
         evidence = RecoveryEvidence.from_outcome(outcome)
         context: dict[str, object] = {
@@ -228,7 +232,7 @@ class DurablePaymentFlow(BaseFlow):
                 operation.payment_id,
                 operation.operation_id,
                 outcome,
-                submission_response=True,
+                submission_response=submission_response,
             )
         except (InvalidTransitionError, OperationConflictError) as exc:
             context["recovery_recorded"] = await self._retain_failure(
@@ -342,7 +346,9 @@ class DurablePaymentFlow(BaseFlow):
                     is LookupSemantics.AUTHORITATIVE_INCLUDING_ABSENCE
                     else OperationState.UNKNOWN
                 )
-            result = await self._record_evidence(operation, outcome)
+            result = await self._record_evidence(
+                operation, outcome, submission_response=False
+            )
             operation = result.operation
         result = await self._operation_result(operation)
         current_time = now + timedelta(seconds=monotonic() - started)

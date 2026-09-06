@@ -193,6 +193,90 @@ async def test_callback_completion_cannot_hide_unrecorded_response_after_storage
     ).captured_funds == Decimal("20")
 
 
+async def test_query_cannot_acknowledge_paused_submission_response():
+    from getpaid_core.durable import LookupSemantics
+    from getpaid_core.durable import OperationCapabilities
+    from getpaid_core.durable import OperationIntent
+    from tests.conftest import MockProcessor
+    from tests.test_durable_dispatch import make_flow
+
+    callback_done, finish = asyncio.Event(), asyncio.Event()
+
+    class FailingAfterQuery(InMemoryDurableRepository):
+        fail = False
+
+        async def record_operation_outcome(self, *args, **kwargs):
+            if self.fail:
+                raise OSError("result storage unavailable")
+            return await super().record_operation_outcome(*args, **kwargs)
+
+        async def record_operation_failure(self, *args):
+            raise OSError("recovery storage unavailable")
+
+    class Queryable(MockProcessor):
+        operation_capabilities = {
+            OperationType.CHARGE: OperationCapabilities(
+                lookup_semantics=LookupSemantics.AUTHORITATIVE,
+            )
+        }
+
+        @classmethod
+        async def submit_operation(cls, operation, *, config):
+            await repository.apply_observation(
+                "pay",
+                PaymentObservation(
+                    operation_id="intent",
+                    outcome=OperationOutcome(
+                        OperationState.SUCCEEDED, settled_amount=Decimal("20")
+                    ),
+                ),
+            )
+            callback_done.set()
+            await finish.wait()
+            return OperationOutcome(
+                OperationState.SUCCEEDED, settled_amount=Decimal("30")
+            )
+
+        @classmethod
+        async def lookup_operation(cls, operation, *, config):
+            return OperationOutcome(
+                OperationState.SUCCEEDED, settled_amount=Decimal("20")
+            )
+
+    from getpaid_core.durable import PaymentFacts
+
+    repository = FailingAfterQuery(
+        [
+            PaymentFacts(
+                "pay",
+                Decimal("100"),
+                backend=Queryable.slug,
+                remaining_authorization=Decimal("100"),
+                status="pre-auth",
+            )
+        ]
+    )
+    _, flow = make_flow(Queryable, repository=repository)
+    task = asyncio.create_task(
+        flow.execute_operation(
+            "pay",
+            OperationIntent("intent", OperationType.CHARGE, Decimal("30")),
+            now=NOW,
+        )
+    )
+    await callback_done.wait()
+    try:
+        await flow.reconcile_operation("pay", "intent", now=NOW)
+        repository.fail = True
+    finally:
+        finish.set()
+    with pytest.raises(OperationPersistenceError):
+        await task
+    assert [
+        r.operation_id for r in await repository.list_unresolved_operations()
+    ] == ["intent"]
+
+
 async def test_flagged_terminal_operation_can_still_be_queried_without_resubmission():
     from getpaid_core.durable import LookupSemantics
     from getpaid_core.durable import OperationCapabilities
