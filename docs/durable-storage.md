@@ -312,7 +312,7 @@ remains until an audited decision clears it.
 
 Cancellation always propagates. Core never turns a cancelled task into provider
 rejection, an ordinary success or a silent return. Before it propagates, one
-bounded local cleanup runs -- and only where the provider has already been
+bounded local cleanup runs — and only where the provider has already been
 reached:
 
 | Cancelled at | Cleanup | If the cleanup does not land |
@@ -322,10 +322,11 @@ reached:
 | The outcome write after a provider response | commits that outcome once more, or retains its safe evidence and flags reconciliation | the durable record written before it remains the recovery anchor |
 | An authoritative query's evidence write | the same, acknowledging no submitting worker | the same |
 | Operator resolution, or applying an observation | none; neither carries an outstanding provider effect of its own | retry the same resolution ID; redelivery of the callback is the provider's job |
+| `flow.record_operation_outcome()`, called with evidence the application already holds | none; core never obtained this evidence and cannot re-obtain it | the caller still holds it, and records it again |
 
 Task cancellation is not provider cancellation. A cancelled wait cannot
 establish whether the command reached the provider, so the recorded outcome is
-`unknown` -- never rejection, and never permission to submit again. Retry
+`unknown` — never rejection, and never permission to submit again. Retry
 eligibility stays governed by the provider's declared idempotency guarantee.
 
 Cleanup is one owned task bounded by `recovery_timeout`, writing only through
@@ -802,10 +803,10 @@ These are deliberately absent here and tracked separately:
   the frozen operation instead. `PaymentObservation` supplies cross-channel
   correlation mechanics, but each plugin must normalize authenticated evidence;
   never infer correlation merely from the currently active operation.
-- **Cancellation recovery** — cancellation-aware bounded cleanup remains
-  follow-on work. Ordinary post-response recovery and audited operation-resolution
-  mechanics are implemented here, not a scheduler, database adapter or operator
-  authorization system.
+- **Reconciliation scheduling** — post-response recovery, cancellation-aware
+  bounded cleanup and audited operation-resolution mechanics are implemented
+  here; a scheduler, database adapter or operator authorization system is not.
+  The application decides when to reconcile the work they leave behind.
 - **Real adapter/provider assurance and the complete ADR** — these landed
   reconciliation mechanics do not establish database isolation, authenticate a
   real provider's evidence, or claim the entire accepted ADR has shipped.

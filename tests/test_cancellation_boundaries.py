@@ -79,13 +79,33 @@ async def cancel_at(barrier, task):
         await task
 
 
-def orphan_tasks():
-    """Tasks this session left running behind a completed cleanup."""
+def lingering_tasks():
+    """Every task still on the loop besides the test's own.
+
+    Cleanup owns its write, so once a cancelled call has returned there is
+    nothing of core's left running: no detached save outlives it.
+    """
     return {
         task
         for task in asyncio.all_tasks()
         if task is not asyncio.current_task()
     }
+
+
+async def assert_discoverable(repository, operation_id="intent"):
+    """The intent a restarted process must still find without an exception."""
+    assert operation_id in {
+        record.operation_id
+        for record in await repository.list_unresolved_operations()
+    }
+
+
+async def assert_money_unchanged(repository, before):
+    """No cancellation path may move money on its way out."""
+    facts = await repository.get_payment_facts("pay")
+    assert facts.captured_funds == before.captured_funds
+    assert facts.refunded_funds == before.refunded_funds
+    assert facts.remaining_authorization == before.remaining_authorization
 
 
 @pytest.mark.parametrize("operation_type", list(OperationType))
@@ -108,7 +128,7 @@ async def test_cancellation_at_final_save_commits_evidence_and_propagates(
     # The interrupted write is retried once, under the same claimed attempt.
     assert repository_type.attempts == [1, 1]
     assert len(calls) == 1
-    assert not orphan_tasks()
+    assert not lingering_tasks()
 
 
 @pytest.mark.parametrize("operation_type", list(OperationType))
@@ -133,19 +153,13 @@ async def test_cancellation_awaiting_provider_records_unknown_and_propagates(
     assert operation.state is OperationState.UNKNOWN
     assert not operation.response_pending
     assert operation.settled_amount is None
-    assert "intent" in {
-        record.operation_id
-        for record in await repository.list_unresolved_operations()
-    }
-    facts = await repository.get_payment_facts("pay")
-    assert facts.captured_funds == before.captured_funds
-    assert facts.refunded_funds == before.refunded_funds
-    assert facts.remaining_authorization == before.remaining_authorization
+    await assert_discoverable(repository)
+    await assert_money_unchanged(repository, before)
     # An unknown outcome is not permission to send the command again.
     resumed = await flow.execute_operation("pay", intent, now=NOW)
     assert resumed.outcome is OperationState.UNKNOWN
     assert len(calls) == 1
-    assert not orphan_tasks()
+    assert not lingering_tasks()
 
 
 @pytest.mark.parametrize("operation_type", list(OperationType))
@@ -168,15 +182,10 @@ async def test_failed_cleanup_write_retains_evidence_for_reconciliation(
         "provider-1"
     ]
     assert operation.recovery_evidence[0].state is OperationState.SUCCEEDED
-    facts = await repository.get_payment_facts("pay")
-    assert facts.captured_funds == before.captured_funds
-    assert facts.refunded_funds == before.refunded_funds
-    assert "intent" in {
-        record.operation_id
-        for record in await repository.list_unresolved_operations()
-    }
+    await assert_money_unchanged(repository, before)
+    await assert_discoverable(repository)
     assert len(calls) == 1
-    assert not orphan_tasks()
+    assert not lingering_tasks()
 
 
 @pytest.mark.parametrize("operation_type", list(OperationType))
@@ -196,12 +205,9 @@ async def test_timed_out_cleanup_leaves_the_submission_anchor_discoverable(
     assert operation.state is OperationState.SUBMITTING
     assert operation.response_pending
     assert not operation.recovery_evidence
-    assert "intent" in {
-        record.operation_id
-        for record in await repository.list_unresolved_operations()
-    }
+    await assert_discoverable(repository)
     assert len(calls) == 1
-    assert not orphan_tasks()
+    assert not lingering_tasks()
 
 
 @pytest.mark.parametrize("operation_type", list(OperationType))
@@ -225,12 +231,9 @@ async def test_repeated_cancellation_stops_cleanup_without_orphan_saves(
     operation = await repository.get_operation("pay", "intent")
     assert operation.state is OperationState.SUBMITTING
     assert not operation.recovery_evidence
-    assert "intent" in {
-        record.operation_id
-        for record in await repository.list_unresolved_operations()
-    }
+    await assert_discoverable(repository)
     assert len(calls) == 1
-    assert not orphan_tasks()
+    assert not lingering_tasks()
 
 
 async def queried_charge(repository_type, *, before_answer=None):
@@ -295,7 +298,7 @@ async def test_cancelled_provider_query_settles_nothing_and_propagates():
     assert operation.correlation is None
     assert not operation.reconciliation_required
     assert (await repository.get_payment_facts("pay")).captured_funds == 0
-    assert not orphan_tasks()
+    assert not lingering_tasks()
 
 
 async def test_cancelled_query_commits_its_evidence_without_claiming_a_worker():
@@ -312,7 +315,7 @@ async def test_cancelled_query_commits_its_evidence_without_claiming_a_worker():
     # The submitting response acknowledged attempt 1; a query acknowledges
     # no producer, and the cleanup must not start acknowledging one.
     assert repository_type.attempts == [1, None, None]
-    assert not orphan_tasks()
+    assert not lingering_tasks()
 
 
 async def test_cancelled_operator_resolution_commits_nothing_and_retries():
@@ -340,7 +343,7 @@ async def test_cancelled_operator_resolution_commits_nothing_and_retries():
     await cancel_at(BlockedResolution.entered, task)
     assert await repository.get_operation("pay", "intent") == before
     assert (await repository.get_payment_facts("pay")).captured_funds == 0
-    assert not orphan_tasks()
+    assert not lingering_tasks()
     # An audited decision has no provider effect to recover: the operator
     # commits the same resolution ID again.
     result = await flow.resolve_operation(
@@ -372,11 +375,8 @@ async def test_cancellation_before_submission_never_reaches_the_provider():
     assert calls == []
     operation = await repository.get_operation("pay", "intent")
     assert operation.state is OperationState.RESERVED
-    assert "intent" in {
-        record.operation_id
-        for record in await repository.list_unresolved_operations()
-    }
-    assert not orphan_tasks()
+    await assert_discoverable(repository)
+    assert not lingering_tasks()
 
 
 async def test_cancelled_observation_commits_nothing_and_propagates():
@@ -400,4 +400,4 @@ async def test_cancelled_observation_commits_nothing_and_propagates():
     assert (
         await repository.get_operation("pay", "intent")
     ).state is OperationState.UNKNOWN
-    assert not orphan_tasks()
+    assert not lingering_tasks()

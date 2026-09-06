@@ -17,7 +17,7 @@
   `unknown` outcome and retires that worker's response claim; a cancelled
   outcome write is completed once more, or its safe evidence retained with a
   reconciliation flag. Cleanup is a single owned task bounded by
-  `recovery_timeout` -- never provider I/O, never a detached save -- and a
+  `recovery_timeout` — never provider I/O, never a detached save — and a
   further cancellation stops it, leaving the durable record as the recovery
   anchor. Applications must budget `recovery_timeout` into their own deadlines.
   Cancellation is never relabelled as rejection or success. asyncio only.

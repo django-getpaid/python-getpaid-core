@@ -355,7 +355,10 @@ class DurablePaymentFlow(BaseFlow):
             return await asyncio.shield(task)
         except asyncio.CancelledError:
             task.cancel()
-            with suppress(BaseException):
+            # Awaiting the stopped task is what keeps it from outliving
+            # this call; its own cancellation is the expected result, and
+            # ``_bounded_write`` has already absorbed any write failure.
+            with suppress(asyncio.CancelledError):
                 await task
             raise
 

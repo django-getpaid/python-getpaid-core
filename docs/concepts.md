@@ -44,8 +44,10 @@ the operator; core atomically compares reviewed snapshots, applies financial rul
 and commits audit with settlement. Stale decisions fail, old evidence survives, and
 a new contradictory callback can reopen reconciliation. Time alone never resolves
 uncertainty. See the {ref}`recovery contract <audited-operator-resolution>`
-for storage upgrade and error migration details. Cancellation-aware cleanup remains
-separate work; these guarantees do not extend the released `PaymentFlow`.
+for storage upgrade and error migration details. Cancelling a command runs one
+bounded local cleanup before the cancellation propagates; see
+{ref}`cancellation <cancellation-aware-cleanup>`. None of these guarantees
+extends to the released `PaymentFlow`.
 
 ## Durable Observations and Reconciliation
 
