@@ -75,6 +75,31 @@ class UnsupportedRepositoryError(GetPaidException):
     """
 
 
+class UnsupportedProcessorError(GetPaidException):
+    """The processor has not declared a safe durable operation contract."""
+
+
+class OperationEvidenceError(InvalidTransitionError):
+    """A provider response cannot establish a valid operation outcome.
+
+    This is post-submission validation failure, not provider rejection.
+    Reconcile the durable intent; never blindly retry the command.
+    """
+
+    provider_resubmission_allowed = False
+
+
+class OperationPersistenceError(GetPaidException):
+    """Local durability failed after provider I/O; reconcile the stored intent.
+
+    Context contains only payment/operation identity, operation type and safe
+    known correlation. The pre-submission record remains the recovery anchor.
+    This exception never authorizes provider resubmission.
+    """
+
+    provider_resubmission_allowed = False
+
+
 class StateConflictError(GetPaidException):
     """A concurrent writer committed first; the plan was built on stale facts.
 

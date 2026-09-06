@@ -1,0 +1,623 @@
+"""Durable submission ownership, immutable requests, and outcome ordering."""
+
+import asyncio
+from dataclasses import replace
+from datetime import UTC
+from datetime import datetime
+from datetime import timedelta
+from decimal import Decimal
+
+import pytest
+
+from getpaid_core.durable.memory import InMemoryDurableRepository
+from getpaid_core.durable.records import CANCELLATION_TARGET
+from getpaid_core.durable.records import OperationIntent
+from getpaid_core.durable.records import OperationOutcome
+from getpaid_core.durable.records import OperationState
+from getpaid_core.durable.records import OperationType
+from getpaid_core.durable.records import PaymentFacts
+from getpaid_core.durable.rules import plan_outcome
+from getpaid_core.durable.rules import plan_reservation
+from getpaid_core.durable.rules import plan_submission
+from getpaid_core.enums import PaymentStatus
+from getpaid_core.exceptions import InvalidTransitionError
+from getpaid_core.exceptions import OperationConflictError
+from getpaid_core.exceptions import ReconciliationBlockedError
+
+
+def authorized_facts(**overrides):
+    return replace(
+        PaymentFacts(
+            payment_id="payment-1",
+            backend="provider",
+            amount_required=Decimal("100"),
+            remaining_authorization=Decimal("100"),
+            status=PaymentStatus.PRE_AUTH,
+        ),
+        **overrides,
+    )
+
+
+def charge_intent(**overrides):
+    return OperationIntent(
+        **{
+            "operation_id": "charge-1",
+            "operation_type": OperationType.CHARGE,
+            **overrides,
+        }
+    )
+
+
+def test_reservation_owns_nested_parameters_and_normalizes_mapping_order():
+    source = {"items": [{"price": Decimal("1.00"), "name": "a"}]}
+    intent = charge_intent(parameters=source)
+    record = plan_reservation(authorized_facts(), (), intent).operation
+    source["items"][0]["price"] = Decimal("9")
+    source["items"].append({"name": "b"})
+
+    same = charge_intent(
+        parameters={"items": [{"name": "a", "price": Decimal("1")}]}
+    )
+    assert intent.parameters_digest == same.parameters_digest
+    assert record.parameters["items"][0]["price"] == Decimal("1")
+    assert len(record.parameters["items"]) == 1
+    with pytest.raises(TypeError):
+        record.parameters["items"][0]["price"] = Decimal("4")
+    assert record.starting_authorization == Decimal("100")
+    assert record.backend == "provider"
+    assert record.idempotency_key
+    assert (
+        plan_reservation(authorized_facts(), (record,), same).operation
+        == record
+    )
+
+
+async def test_atomic_submission_claim_freezes_first_window_and_scope():
+    repository = InMemoryDurableRepository([authorized_facts()])
+    await repository.reserve_operation("payment-1", charge_intent())
+    now = datetime(2026, 9, 6, tzinfo=UTC)
+    until = now + timedelta(hours=1)
+    claims = await asyncio.gather(
+        *[
+            repository.claim_submission(
+                "payment-1",
+                "charge-1",
+                expected_attempt=0,
+                now=now,
+                retry_until=until,
+                idempotency_scope="payment",
+            )
+            for _ in range(2)
+        ]
+    )
+    assert sum(plan.granted for plan in claims) == 1
+    first = await repository.get_operation("payment-1", "charge-1")
+    assert first.state is OperationState.SUBMITTING
+    assert first.submission_attempts == 1
+    assert first.submitted_at == now
+    assert first.retry_until == until
+    assert first.idempotency_scope == "payment"
+
+    await repository.record_operation_outcome(
+        "payment-1", "charge-1", OperationOutcome(OperationState.UNKNOWN)
+    )
+    retried = await repository.claim_submission(
+        "payment-1",
+        "charge-1",
+        expected_attempt=1,
+        now=now + timedelta(minutes=1),
+        retry_until=until + timedelta(days=1),
+        idempotency_scope="changed",
+    )
+    assert retried.granted
+    assert retried.operation.submission_attempts == 2
+    assert retried.operation.submitted_at == now
+    assert retried.operation.retry_until == until
+    assert retried.operation.idempotency_scope == "payment"
+    assert retried.operation.idempotency_key == first.idempotency_key
+    expired = await repository.claim_submission(
+        "payment-1", "charge-1", expected_attempt=2, now=until
+    )
+    assert not expired.granted
+    assert expired.operation == retried.operation
+
+
+@pytest.mark.parametrize(
+    "state, amount",
+    [
+        (OperationState.RESERVED, None),
+        (OperationState.SUBMITTING, None),
+        (OperationState.SUCCEEDED, Decimal("41")),
+        (OperationState.SUCCEEDED, Decimal("0")),
+        (OperationState.PROVIDER_PENDING, Decimal("10")),
+        (OperationState.REJECTED, Decimal("10")),
+        (OperationState.UNKNOWN, Decimal("10")),
+    ],
+)
+def test_normalized_outcomes_cannot_claim_unreserved_money(state, amount):
+    facts = authorized_facts()
+    operation = plan_reservation(
+        facts, (), charge_intent(amount=Decimal("40"))
+    ).operation
+    with pytest.raises(InvalidTransitionError):
+        plan_outcome(
+            facts, operation, OperationOutcome(state, settled_amount=amount)
+        )
+
+
+@pytest.mark.parametrize(
+    "late_state, late_amount, conflicting",
+    [
+        (OperationState.PROVIDER_PENDING, None, False),
+        (OperationState.UNKNOWN, None, False),
+        (OperationState.REJECTED, None, True),
+        (OperationState.SUCCEEDED, Decimal("30"), True),
+    ],
+)
+def test_late_evidence_preserves_terminal_money_and_flags_contradictions(
+    late_state, late_amount, conflicting
+):
+    facts = authorized_facts()
+    operation = plan_reservation(
+        facts, (), charge_intent(amount=Decimal("40"))
+    ).operation
+    completed = plan_outcome(
+        facts,
+        operation,
+        OperationOutcome(
+            OperationState.SUCCEEDED, settled_amount=Decimal("20")
+        ),
+    )
+    late = plan_outcome(
+        completed.facts,
+        completed.operation,
+        OperationOutcome(
+            late_state, settled_amount=late_amount, correlation="capture-1"
+        ),
+    )
+    assert late.operation.state is OperationState.SUCCEEDED
+    assert late.operation.correlation == "capture-1"
+    assert late.facts.captured_funds == Decimal("20")
+    assert late.facts.reconciliation_required is conflicting
+    assert late.operation.reconciliation_required is conflicting
+
+
+@pytest.mark.parametrize(
+    "disputed",
+    [
+        OperationOutcome(OperationState.SUCCEEDED, Decimal("30"), "capture-1"),
+        OperationOutcome(
+            OperationState.SUCCEEDED,
+            Decimal("30"),
+            "capture-1",
+            reconciliation_required=True,
+        ),
+        OperationOutcome(OperationState.SUCCEEDED, Decimal("40"), "capture-1"),
+        OperationOutcome(OperationState.SUCCEEDED, Decimal("20"), "capture-2"),
+        OperationOutcome(OperationState.SUCCEEDED, Decimal("20"), "capture-3"),
+        OperationOutcome(OperationState.REJECTED, correlation="capture-1"),
+    ],
+)
+def test_conflicting_outcome_retains_recoverable_evidence(disputed):
+    facts = authorized_facts()
+    operation = plan_reservation(
+        facts, (), charge_intent(amount=Decimal("40"))
+    ).operation
+    completed = plan_outcome(
+        facts,
+        operation,
+        OperationOutcome(OperationState.SUCCEEDED, Decimal("20"), "capture-1"),
+    )
+
+    conflict = plan_outcome(completed.facts, completed.operation, disputed)
+
+    assert conflict.operation.conflicting_outcomes == (disputed,)
+    assert conflict.operation == replace(
+        completed.operation,
+        reconciliation_required=True,
+        conflicting_outcomes=(disputed,),
+    )
+    assert conflict.facts == replace(
+        completed.facts, reconciliation_required=True
+    )
+    assert completed.operation.conflicting_outcomes == ()
+
+
+@pytest.mark.parametrize(
+    "flag", [{}, [], {"raw": "secret"}, 0, 1, "true", None]
+)
+async def test_malformed_reconciliation_flag_cannot_enter_stored_evidence(flag):
+    repository = InMemoryDurableRepository([authorized_facts()])
+    await repository.reserve_operation(
+        "payment-1", charge_intent(amount=Decimal("40"))
+    )
+    completed = await repository.record_operation_outcome(
+        "payment-1",
+        "charge-1",
+        OperationOutcome(OperationState.SUCCEEDED, Decimal("20"), "capture-1"),
+    )
+    disputed = OperationOutcome(
+        OperationState.SUCCEEDED,
+        Decimal("30"),
+        "capture-1",
+        reconciliation_required=flag,
+    )
+
+    with pytest.raises(InvalidTransitionError, match="must be a boolean"):
+        await repository.record_operation_outcome(
+            "payment-1", "charge-1", disputed
+        )
+    if isinstance(flag, dict):
+        flag["later_payload"] = "must not enter storage"
+    elif isinstance(flag, list):
+        flag.append("must not enter storage")
+
+    assert (
+        await repository.get_operation("payment-1", "charge-1")
+        == completed.operation
+    )
+    assert await repository.get_payment_facts("payment-1") == completed.facts
+
+
+async def test_disputed_prepare_handles_survive_repeated_delivery_and_reads():
+    facts = PaymentFacts(payment_id="payment-1", amount_required=Decimal("100"))
+    repository = InMemoryDurableRepository([facts])
+    await repository.reserve_operation(
+        "payment-1", OperationIntent("prepare-1", OperationType.PREPARE)
+    )
+    completed = await repository.record_operation_outcome(
+        "payment-1",
+        "prepare-1",
+        OperationOutcome(OperationState.SUCCEEDED, external_id="order-1"),
+    )
+    disputed = tuple(
+        OperationOutcome(OperationState.SUCCEEDED, external_id=handle)
+        for handle in ("order-2", "order-3")
+    )
+    for outcome in (*disputed, *disputed):
+        await repository.record_operation_outcome(
+            "payment-1", "prepare-1", outcome
+        )
+
+    stored = await repository.get_operation("payment-1", "prepare-1")
+    assert stored.conflicting_outcomes == disputed
+    assert stored.state is OperationState.SUCCEEDED
+    assert stored.reconciliation_required
+    assert await repository.get_payment_facts("payment-1") == replace(
+        completed.facts, reconciliation_required=True
+    )
+    assert await repository.list_unresolved_operations() == (stored,)
+
+
+def test_conflicting_correlation_never_settles_another_provider_operation():
+    facts = authorized_facts()
+    operation = plan_reservation(
+        facts, (), charge_intent(amount=Decimal("40"))
+    ).operation
+    pending = plan_outcome(
+        facts,
+        operation,
+        OperationOutcome(
+            OperationState.PROVIDER_PENDING, correlation="capture-1"
+        ),
+    )
+    conflict = plan_outcome(
+        pending.facts,
+        pending.operation,
+        OperationOutcome(OperationState.SUCCEEDED, correlation="capture-2"),
+    )
+    assert conflict.operation.correlation == "capture-1"
+    assert conflict.operation.state is OperationState.PROVIDER_PENDING
+    assert conflict.facts.captured_funds == Decimal("0")
+    assert conflict.operation.reconciliation_required
+    assert conflict.facts.reconciliation_required
+
+
+async def test_pending_prepare_persists_handle_and_late_success_preserves_callback():
+    from getpaid_core.enums import PaymentEvent
+    from getpaid_core.types import PaymentUpdate
+
+    facts = PaymentFacts(payment_id="payment-1", amount_required=Decimal("100"))
+    repository = InMemoryDurableRepository([facts])
+    await repository.reserve_operation(
+        "payment-1", OperationIntent("prepare-1", OperationType.PREPARE)
+    )
+    pending = await repository.record_operation_outcome(
+        "payment-1",
+        "prepare-1",
+        OperationOutcome(
+            OperationState.PROVIDER_PENDING, external_id="order-1"
+        ),
+    )
+    assert pending.facts.external_id == "order-1"
+    await repository.apply_observation(
+        "payment-1",
+        PaymentUpdate(
+            payment_event=PaymentEvent.LOCKED,
+            locked_amount=Decimal("100"),
+            external_id="order-1",
+        ),
+    )
+    success = await repository.record_operation_outcome(
+        "payment-1",
+        "prepare-1",
+        OperationOutcome(OperationState.SUCCEEDED, external_id="order-1"),
+    )
+    assert success.facts.status is PaymentStatus.PRE_AUTH
+    assert success.facts.external_id == "order-1"
+    conflict = await repository.record_operation_outcome(
+        "payment-1",
+        "prepare-1",
+        OperationOutcome(OperationState.SUCCEEDED, external_id="order-2"),
+    )
+    assert conflict.facts.external_id == "order-1"
+    assert conflict.facts.reconciliation_required
+
+
+@pytest.mark.parametrize(
+    "state, correlation, allowed",
+    [
+        (OperationState.RESERVED, "refund-handle", False),
+        (OperationState.SUBMITTING, "refund-handle", False),
+        (OperationState.UNKNOWN, "refund-handle", False),
+        (OperationState.PROVIDER_PENDING, None, False),
+        (OperationState.PROVIDER_PENDING, "", False),
+        (OperationState.PROVIDER_PENDING, "refund-handle", True),
+    ],
+)
+def test_cancellation_only_reserves_correlated_provider_pending_refund(
+    state, correlation, allowed
+):
+    facts = authorized_facts(
+        captured_funds=Decimal("100"),
+        remaining_authorization=Decimal("0"),
+        status=PaymentStatus.PAID,
+    )
+    refund = plan_reservation(
+        facts, (), OperationIntent("refund-1", OperationType.START_REFUND)
+    ).operation
+    refund = replace(refund, state=state, correlation=correlation)
+    intent = OperationIntent(
+        "cancel-1",
+        OperationType.CANCEL_REFUND,
+        parameters={CANCELLATION_TARGET: "refund-1"},
+    )
+    if not allowed:
+        with pytest.raises(OperationConflictError):
+            plan_reservation(facts, (refund,), intent)
+        return
+    cancellation = plan_reservation(facts, (refund,), intent).operation
+    assert cancellation.parameters[CANCELLATION_TARGET] == "refund-1"
+    assert cancellation.parameters["target_correlation"] == "refund-handle"
+    assert cancellation.parameters_digest == intent.parameters_digest
+    assert (
+        plan_reservation(facts, (refund, cancellation), intent).operation
+        == cancellation
+    )
+
+
+@pytest.mark.parametrize("refund_wins", [False, True])
+async def test_cancellation_atomically_resolves_target_without_erasing_refund(
+    refund_wins,
+):
+    facts = authorized_facts(
+        captured_funds=Decimal("100"),
+        remaining_authorization=Decimal("0"),
+        status=PaymentStatus.PAID,
+    )
+    repository = InMemoryDurableRepository([facts])
+    await repository.reserve_operation(
+        "payment-1", OperationIntent("refund-1", OperationType.START_REFUND)
+    )
+    await repository.record_operation_outcome(
+        "payment-1",
+        "refund-1",
+        OperationOutcome(
+            OperationState.PROVIDER_PENDING, correlation="provider-refund"
+        ),
+    )
+    await repository.reserve_operation(
+        "payment-1",
+        OperationIntent(
+            "cancel-1",
+            OperationType.CANCEL_REFUND,
+            parameters={CANCELLATION_TARGET: "refund-1"},
+        ),
+    )
+    if refund_wins:
+        await repository.record_operation_outcome(
+            "payment-1", "refund-1", OperationOutcome(OperationState.SUCCEEDED)
+        )
+    cancelled = await repository.record_operation_outcome(
+        "payment-1", "cancel-1", OperationOutcome(OperationState.SUCCEEDED)
+    )
+    target = await repository.get_operation("payment-1", "refund-1")
+    assert target.state is (
+        OperationState.SUCCEEDED if refund_wins else OperationState.REJECTED
+    )
+    assert cancelled.facts.refunded_funds == (
+        Decimal("100") if refund_wins else Decimal("0")
+    )
+    assert cancelled.facts.captured_funds == Decimal("100")
+    assert cancelled.facts.status is (
+        PaymentStatus.REFUNDED if refund_wins else PaymentStatus.PAID
+    )
+    assert await repository.list_unresolved_operations() == ()
+    assert cancelled.operation.state is OperationState.SUCCEEDED
+    assert await repository.get_payment_facts("payment-1") == cancelled.facts
+
+
+async def test_unresolved_refund_status_starts_at_reservation_and_pending_cannot_regress():
+    facts = authorized_facts(
+        captured_funds=Decimal("100"),
+        remaining_authorization=Decimal("0"),
+        status=PaymentStatus.PAID,
+    )
+    repository = InMemoryDurableRepository([facts])
+    await repository.reserve_operation(
+        "payment-1", OperationIntent("refund-1", OperationType.START_REFUND)
+    )
+    assert (
+        await repository.get_payment_facts("payment-1")
+    ).status is PaymentStatus.REFUND_STARTED
+    await repository.claim_submission(
+        "payment-1",
+        "refund-1",
+        expected_attempt=0,
+        now=datetime(2026, 9, 6, tzinfo=UTC),
+    )
+    assert (
+        await repository.get_payment_facts("payment-1")
+    ).status is PaymentStatus.REFUND_STARTED
+    unknown = await repository.record_operation_outcome(
+        "payment-1", "refund-1", OperationOutcome(OperationState.UNKNOWN)
+    )
+    assert unknown.facts.status is PaymentStatus.REFUND_STARTED
+    await repository.record_operation_outcome(
+        "payment-1",
+        "refund-1",
+        OperationOutcome(OperationState.PROVIDER_PENDING),
+    )
+    later_unknown = await repository.record_operation_outcome(
+        "payment-1", "refund-1", OperationOutcome(OperationState.UNKNOWN)
+    )
+    assert later_unknown.operation.state is OperationState.PROVIDER_PENDING
+    assert later_unknown.facts.status is PaymentStatus.REFUND_STARTED
+    assert later_unknown.facts.refunded_funds == Decimal("0")
+    assert later_unknown.facts.captured_funds == Decimal("100")
+
+
+def test_release_response_after_callback_preserves_confirmed_release():
+    facts = authorized_facts()
+    operation = plan_reservation(
+        facts, (), OperationIntent("release-1", OperationType.RELEASE_LOCK)
+    ).operation
+    callback_facts = replace(
+        facts,
+        remaining_authorization=Decimal("0"),
+        status=PaymentStatus.CANCELLED,
+    )
+    response = plan_outcome(
+        callback_facts, operation, OperationOutcome(OperationState.SUCCEEDED)
+    )
+    assert response.operation.state is OperationState.SUCCEEDED
+    assert response.facts == callback_facts
+
+
+@pytest.mark.parametrize(
+    "parameters",
+    [
+        {"value": object()},
+        {"value": {"set"}},
+        {1: "not-a-string-key"},
+        {"value": Decimal("NaN")},
+        {"value": Decimal("Infinity")},
+        {"value": float("inf")},
+        {"value": float("nan")},
+        {"nested": [{"value": b"bytes"}]},
+        None,
+    ],
+)
+def test_unsupported_parameters_are_rejected_before_reservation(parameters):
+    with pytest.raises(InvalidTransitionError):
+        charge_intent(parameters=parameters)
+
+
+@pytest.mark.parametrize("operation_id", ["", " ", None, 1, False])
+def test_operation_identity_requires_a_nonempty_string(operation_id):
+    with pytest.raises(InvalidTransitionError):
+        charge_intent(operation_id=operation_id)
+
+
+def test_cyclic_parameters_are_rejected_without_retaining_aliases():
+    cyclic = {}
+    cyclic["self"] = cyclic
+    with pytest.raises(InvalidTransitionError):
+        charge_intent(parameters=cyclic)
+
+
+@pytest.mark.parametrize(
+    "first, second",
+    [
+        (True, 1),
+        (1, 1.0),
+        (1, Decimal("1")),
+        ("1", Decimal("1")),
+        ([1, 2], [2, 1]),
+        (None, "None"),
+    ],
+)
+def test_changed_parameter_type_or_sequence_order_conflicts(first, second):
+    operation = plan_reservation(
+        authorized_facts(), (), charge_intent(parameters={"value": first})
+    ).operation
+    with pytest.raises(OperationConflictError):
+        plan_reservation(
+            authorized_facts(),
+            (operation,),
+            charge_intent(parameters={"value": second}),
+        )
+
+
+def test_idempotency_keys_are_scoped_without_delimiter_collisions():
+    record = plan_reservation(authorized_facts(), (), charge_intent()).operation
+    keys = {
+        record.idempotency_key,
+        replace(record, backend="other").idempotency_key,
+        replace(record, payment_id="other").idempotency_key,
+        replace(record, operation_id="other").idempotency_key,
+        replace(record, backend="a", payment_id="b\u001fc").idempotency_key,
+        replace(record, backend="a\u001fb", payment_id="c").idempotency_key,
+    }
+    assert len(keys) == 6
+
+
+@pytest.mark.parametrize("state", list(OperationState))
+def test_submission_claims_obey_state_and_initial_attempt(state):
+    facts = authorized_facts()
+    reserved = plan_reservation(facts, (), charge_intent()).operation
+    now = datetime(2026, 9, 6, tzinfo=UTC)
+    window = now + timedelta(hours=1)
+    initial = plan_submission(
+        facts,
+        replace(reserved, state=state),
+        expected_attempt=0,
+        now=now,
+        retry_until=window,
+    )
+    assert initial.granted is (state is OperationState.RESERVED)
+    previous = replace(
+        reserved,
+        state=state,
+        submission_attempts=1,
+        submitted_at=now,
+        retry_until=window,
+    )
+    replay = plan_submission(facts, previous, expected_attempt=1, now=now)
+    assert replay.granted is (
+        state in {OperationState.UNKNOWN, OperationState.SUBMITTING}
+    )
+    assert not plan_submission(
+        facts, previous, expected_attempt=0, now=now
+    ).granted
+    assert not plan_submission(
+        facts, replace(previous, retry_until=None), expected_attempt=1, now=now
+    ).granted
+
+
+def test_reconciliation_blocks_dispatch_but_not_recording_evidence():
+    facts = authorized_facts()
+    operation = plan_reservation(facts, (), charge_intent()).operation
+    facts = replace(facts, reconciliation_required=True)
+    with pytest.raises(ReconciliationBlockedError):
+        plan_submission(
+            facts,
+            operation,
+            expected_attempt=0,
+            now=datetime(2026, 9, 6, tzinfo=UTC),
+        )
+    settled = plan_outcome(
+        facts, operation, OperationOutcome(OperationState.SUCCEEDED)
+    )
+    assert settled.facts.captured_funds == Decimal("100")
+    assert settled.facts.reconciliation_required

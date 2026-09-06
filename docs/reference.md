@@ -40,6 +40,14 @@
    :undoc-members:
 ```
 
+## Durable Provider Contract
+
+```{eval-rst}
+.. automodule:: getpaid_core.durable.provider
+   :members:
+   :undoc-members:
+```
+
 ## Durable Records
 
 ```{eval-rst}

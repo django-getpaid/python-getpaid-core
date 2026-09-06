@@ -4,6 +4,29 @@
 
 ### Breaking Changes
 
+- **Conflicting operation evidence is retained**: adapters must persist and
+  return `OperationRecord.conflicting_outcomes` atomically with operation and
+  payment reconciliation flags. Distinct normalized disputed amounts, states
+  and handles remain recoverable without changing established financial facts;
+  repeated identical disputes do not grow the record. No raw provider payloads
+  are retained. The adapter conformance suite now checks this storage contract.
+
+- **Durable intent dispatch**: `DurablePaymentFlow.execute_operation()` now
+  covers prepare, capture, release, refund and targeted refund cancellation.
+  Application-supplied IDs bind immutable normalized parameters; same-ID retries
+  preserve concrete omitted amounts and per-operation provider correlation.
+  Adapters must add atomic `claim_submission()` and persist frozen submission
+  parameters, starting totals, attempt count and original idempotency window.
+- **Explicit processor capabilities**: durable commands use classmethods
+  `submit_operation()` / `lookup_operation()` with an immutable operation
+  record, not legacy payment-instance methods. Unsupported processors fail
+  before submission. Restricted mode requires explicit per-operation opt-in.
+- **Uncertainty is not rejection**: duplicate calls return pending/unknown
+  intents without resubmitting. Explicit reconciliation can request one retry
+  only within the original provider guarantee. `OperationResult`,
+  `OperationEvidenceError` and `OperationPersistenceError` distinguish outcomes
+  from local failures while preserving the durable recovery anchor.
+
 - **Partial capture no longer strands the remaining authorization**: capture
   and authorization release are now eligible on the payment's current
   financial facts instead of a status guard. After `lock(100)` and

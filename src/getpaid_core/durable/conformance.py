@@ -33,6 +33,10 @@ exercise.
 import asyncio
 from collections.abc import Awaitable
 from collections.abc import Callable
+from dataclasses import replace
+from datetime import UTC
+from datetime import datetime
+from datetime import timedelta
 from decimal import Decimal
 from typing import Any
 from typing import cast
@@ -249,6 +253,66 @@ async def check_unresolved_operations_are_discoverable(
     )
 
 
+async def check_conflicting_outcomes_are_retained(
+    factory: RepositoryFactory,
+) -> None:
+    """Distinct disputes survive concurrent writes, reads and redelivery."""
+    repository = await factory(_authorized_facts())
+    await repository.reserve_operation(
+        PAYMENT_ID,
+        OperationIntent("op-1", OperationType.CHARGE, amount=Decimal("40")),
+    )
+    confirmed = OperationOutcome(
+        OperationState.SUCCEEDED, Decimal("20"), "capture-1"
+    )
+    completed = await repository.record_operation_outcome(
+        PAYMENT_ID, "op-1", confirmed
+    )
+    disputed = (
+        OperationOutcome(OperationState.SUCCEEDED, Decimal("30"), "capture-1"),
+        OperationOutcome(OperationState.SUCCEEDED, Decimal("40"), "capture-1"),
+        OperationOutcome(OperationState.SUCCEEDED, Decimal("20"), "capture-2"),
+        OperationOutcome(OperationState.REJECTED, correlation="capture-1"),
+    )
+    await asyncio.gather(
+        *(
+            repository.record_operation_outcome(PAYMENT_ID, "op-1", evidence)
+            for evidence in disputed
+        )
+    )
+    for evidence in (*disputed, confirmed):
+        await repository.record_operation_outcome(PAYMENT_ID, "op-1", evidence)
+
+    stored = await repository.get_operation(PAYMENT_ID, "op-1")
+    _require(stored is not None, "the disputed operation was lost")
+    assert stored is not None
+    _require(
+        len(stored.conflicting_outcomes) == len(disputed)
+        and all(
+            evidence in stored.conflicting_outcomes for evidence in disputed
+        ),
+        "distinct conflicting outcomes were lost or duplicated in storage",
+    )
+    _require(
+        stored
+        == replace(
+            completed.operation,
+            reconciliation_required=True,
+            conflicting_outcomes=stored.conflicting_outcomes,
+        ),
+        "conflicting evidence overwrote established operation facts",
+    )
+    facts = await repository.get_payment_facts(PAYMENT_ID)
+    _require(
+        facts == replace(completed.facts, reconciliation_required=True),
+        "conflicting evidence changed financial facts or lost reconciliation",
+    )
+    _require(
+        stored in await repository.list_unresolved_operations(),
+        "the disputed terminal operation is not discoverable",
+    )
+
+
 async def check_reconciliation_flags_are_enumerable(
     factory: RepositoryFactory,
 ) -> None:
@@ -423,10 +487,60 @@ async def check_outstanding_operation_blocks_unrelated_commands(
     )
 
 
+async def check_submission_right_is_exclusive(
+    factory: RepositoryFactory,
+) -> None:
+    """Independent workers cannot both acquire the same submission attempt."""
+    repository = await factory(_authorized_facts())
+    intent = OperationIntent("submit-once", OperationType.CHARGE)
+    first, second = await asyncio.gather(
+        repository.reserve_operation(PAYMENT_ID, intent),
+        repository.reserve_operation(PAYMENT_ID, intent),
+    )
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    claims = await asyncio.gather(
+        *(
+            repository.claim_submission(
+                PAYMENT_ID,
+                record.operation_id,
+                expected_attempt=record.submission_attempts,
+                now=now,
+                retry_until=now + timedelta(hours=1),
+                idempotency_scope="conformance",
+            )
+            for record in (first, second)
+        )
+    )
+    _require(
+        sum(claim.granted for claim in claims) == 1,
+        "duplicate workers obtained independent submission rights",
+    )
+    stored = await repository.get_operation(PAYMENT_ID, "submit-once")
+    _require(
+        stored is not None and stored.state is OperationState.SUBMITTING,
+        "submission was not durably marked before provider I/O",
+    )
+    _require(
+        stored is not None and stored.submission_attempts == 1,
+        "submission attempt counter was not committed atomically",
+    )
+    expired = await repository.claim_submission(
+        PAYMENT_ID,
+        "submit-once",
+        expected_attempt=1,
+        now=now + timedelta(hours=2),
+    )
+    _require(not expired.granted, "expiry authorized blind resubmission")
+
+
 #: The checks an adapter must pass, in the order the suite runs them.
 CONFORMANCE_CHECKS: tuple[
     tuple[str, Callable[[RepositoryFactory], Awaitable[None]]], ...
 ] = (
+    (
+        "submission_right_is_exclusive",
+        check_submission_right_is_exclusive,
+    ),
     (
         "stale_capture_cannot_regress_funds",
         check_stale_capture_cannot_regress_funds,
@@ -446,6 +560,10 @@ CONFORMANCE_CHECKS: tuple[
     (
         "unresolved_operations_are_discoverable",
         check_unresolved_operations_are_discoverable,
+    ),
+    (
+        "conflicting_outcomes_are_retained",
+        check_conflicting_outcomes_are_retained,
     ),
     (
         "reconciliation_flags_are_enumerable",

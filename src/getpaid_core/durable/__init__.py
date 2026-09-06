@@ -17,6 +17,9 @@ from getpaid_core.durable.migration import LegacyPaymentState
 from getpaid_core.durable.migration import MigrationFinding
 from getpaid_core.durable.migration import MigrationPlan
 from getpaid_core.durable.migration import plan_migration
+from getpaid_core.durable.provider import LookupSemantics
+from getpaid_core.durable.provider import OperationCapabilities
+from getpaid_core.durable.provider import OperationResult
 from getpaid_core.durable.records import ACTIVE_OPERATION_STATES
 from getpaid_core.durable.records import CANCELLATION_TARGET
 from getpaid_core.durable.records import LEGACY_REPLAY_METADATA_KEYS
@@ -31,6 +34,7 @@ from getpaid_core.durable.records import OutcomePlan
 from getpaid_core.durable.records import PaymentFacts
 from getpaid_core.durable.records import ReplayRecord
 from getpaid_core.durable.records import ReservationPlan
+from getpaid_core.durable.records import SubmissionPlan
 from getpaid_core.durable.records import observation_digest
 from getpaid_core.durable.records import validate_event_identity
 from getpaid_core.durable.records import validate_provider_metadata
@@ -43,6 +47,7 @@ from getpaid_core.durable.repository import supports_durable_state
 from getpaid_core.durable.rules import plan_observation
 from getpaid_core.durable.rules import plan_outcome
 from getpaid_core.durable.rules import plan_reservation
+from getpaid_core.durable.rules import plan_submission
 
 
 __all__ = [
@@ -58,12 +63,15 @@ __all__ = [
     "DurablePaymentRepository",
     "InMemoryDurableRepository",
     "LegacyPaymentState",
+    "LookupSemantics",
     "MigrationFinding",
     "MigrationPlan",
     "ObservationPlan",
+    "OperationCapabilities",
     "OperationIntent",
     "OperationOutcome",
     "OperationRecord",
+    "OperationResult",
     "OperationState",
     "OperationType",
     "OutcomePlan",
@@ -71,6 +79,7 @@ __all__ = [
     "ReplayRecord",
     "RepositoryFactory",
     "ReservationPlan",
+    "SubmissionPlan",
     "commit_semantic_transition",
     "missing_durable_operations",
     "observation_digest",
@@ -78,6 +87,7 @@ __all__ = [
     "plan_observation",
     "plan_outcome",
     "plan_reservation",
+    "plan_submission",
     "require_durable_state",
     "run_conformance_suite",
     "supports_durable_state",

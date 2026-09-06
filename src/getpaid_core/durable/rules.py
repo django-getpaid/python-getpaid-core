@@ -9,12 +9,15 @@ compare-and-set that makes the commit atomic (ADR 0001, section 1).
 
 from collections.abc import Iterable
 from dataclasses import replace
+from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 from typing import Any
 from typing import cast
 
 from getpaid_core._amounts import validate_amount
+from getpaid_core._amounts import validate_payment_amounts
+from getpaid_core.durable.records import CANCELLATION_CORRELATION
 from getpaid_core.durable.records import CANCELLATION_TARGET
 from getpaid_core.durable.records import TERMINAL_OPERATION_STATES
 from getpaid_core.durable.records import ObservationPlan
@@ -27,14 +30,17 @@ from getpaid_core.durable.records import OutcomePlan
 from getpaid_core.durable.records import PaymentFacts
 from getpaid_core.durable.records import ReplayRecord
 from getpaid_core.durable.records import ReservationPlan
+from getpaid_core.durable.records import SubmissionPlan
 from getpaid_core.durable.records import validate_event_identity
 from getpaid_core.durable.records import validate_provider_metadata
 from getpaid_core.enums import PaymentEvent
+from getpaid_core.enums import PaymentStatus
 from getpaid_core.exceptions import InvalidTransitionError
 from getpaid_core.exceptions import OperationConflictError
 from getpaid_core.exceptions import ReconciliationBlockedError
 from getpaid_core.fsm import apply_payment_update
 from getpaid_core.fsm import capturable_amount
+from getpaid_core.fsm import project_payment_status
 from getpaid_core.fsm import refundable_amount
 from getpaid_core.fsm import require_capture_eligible
 from getpaid_core.types import PaymentUpdate
@@ -166,8 +172,20 @@ def _resolve_amount(
     rather than reselecting a default against a later balance.
     """
     operation_type = intent.operation_type
+    view = cast("Payment", _FactsPayment(facts))
+    validate_payment_amounts(view)
 
     if operation_type in {OperationType.PREPARE, OperationType.CANCEL_REFUND}:
+        if intent.amount is not None:
+            raise InvalidTransitionError(
+                "This operation does not accept an amount."
+            )
+        if operation_type is OperationType.PREPARE and (
+            facts.status != PaymentStatus.NEW
+            or facts.captured_funds != 0
+            or facts.remaining_authorization != 0
+        ):
+            raise InvalidTransitionError("Only a new payment can be prepared.")
         return None
 
     if operation_type is OperationType.RELEASE_LOCK:
@@ -185,7 +203,6 @@ def _resolve_amount(
     # apart. Running them here, at reservation time, is what refuses an
     # ineligible capture *before* submission rather than after the
     # provider has moved the money.
-    view = cast("Payment", _FactsPayment(facts))
     if operation_type is OperationType.CHARGE:
         require_capture_eligible(view)
         available, name = capturable_amount(view), "Charge amount"
@@ -215,6 +232,8 @@ def _blocking_operation(
         if (
             intent.operation_type is OperationType.CANCEL_REFUND
             and record.operation_id == target
+            and record.operation_type is OperationType.START_REFUND
+            and record.state is OperationState.PROVIDER_PENDING
         ):
             continue
         return record
@@ -223,22 +242,24 @@ def _blocking_operation(
 
 def _require_cancellation_target(
     operations: Iterable[OperationRecord], intent: OperationIntent
-) -> None:
-    """Refuse a cancellation that does not name an outstanding refund."""
+) -> OperationRecord:
+    """Require a specific provider-pending refund with useful correlation."""
     target = intent.parameters.get(CANCELLATION_TARGET)
-    matched = any(
-        record.operation_id == target
-        and record.operation_type is OperationType.START_REFUND
-        and record.is_active
-        for record in operations
+    for record in operations:
+        if (
+            record.operation_id == target
+            and record.operation_type is OperationType.START_REFUND
+            and record.state is OperationState.PROVIDER_PENDING
+            and isinstance(record.correlation, str)
+            and record.correlation.strip()
+        ):
+            return record
+    raise OperationConflictError(
+        "A refund cancellation must name the correlated provider-pending "
+        f"refund through parameters[{CANCELLATION_TARGET!r}]; "
+        f"{target!r} is not a cancellable refund.",
+        context={"operation_id": intent.operation_id, "target": target},
     )
-    if not matched:
-        raise OperationConflictError(
-            "A refund cancellation must name the pending refund it cancels "
-            f"through parameters[{CANCELLATION_TARGET!r}]; "
-            f"{target!r} is not an outstanding refund.",
-            context={"operation_id": intent.operation_id, "target": target},
-        )
 
 
 def plan_reservation(
@@ -278,7 +299,7 @@ def plan_reservation(
                 "operation ID.",
                 context={"operation_id": intent.operation_id},
             )
-        return ReservationPlan(operation=record, created=False)
+        return ReservationPlan(operation=record, created=False, facts=facts)
 
     if facts.reconciliation_required:
         raise ReconciliationBlockedError(
@@ -291,8 +312,10 @@ def plan_reservation(
             },
         )
 
+    parameters = dict(intent.parameters)
     if intent.operation_type is OperationType.CANCEL_REFUND:
-        _require_cancellation_target(operations, intent)
+        target = _require_cancellation_target(operations, intent)
+        parameters[CANCELLATION_CORRELATION] = target.correlation
 
     blocker = _blocking_operation(operations, intent)
     if blocker is not None:
@@ -317,8 +340,89 @@ def plan_reservation(
             parameters_digest=digest,
             starting_captured=facts.captured_funds,
             starting_refunded=facts.refunded_funds,
+            starting_authorization=facts.remaining_authorization,
+            parameters=parameters,
+            backend=facts.backend,
+            reservation_sequence=max(
+                (record.reservation_sequence for record in operations),
+                default=0,
+            )
+            + 1,
         ),
         created=True,
+        facts=(
+            replace(facts, status=PaymentStatus.REFUND_STARTED)
+            if intent.operation_type is OperationType.START_REFUND
+            else facts
+        ),
+    )
+
+
+def plan_submission(
+    facts: PaymentFacts,
+    operation: OperationRecord,
+    *,
+    expected_attempt: int,
+    now: datetime,
+    retry_until: datetime | None = None,
+    idempotency_scope: str | None = None,
+) -> SubmissionPlan:
+    """Compare-and-set the submission counter without provider I/O.
+
+    A retry caller MUST first reconcile and verify the provider's current
+    idempotency declaration covers the frozen key, scope and payload. This
+    local claim alone cannot establish that a provider retry is safe.
+    Never extend the first attempt's timestamp or retry window on replay.
+    """
+    if operation.payment_id != facts.payment_id:
+        raise OperationConflictError(
+            "Operation belongs to a different payment."
+        )
+    if facts.reconciliation_required or operation.reconciliation_required:
+        raise ReconciliationBlockedError(
+            f"Payment {facts.payment_id!r} requires reconciliation "
+            "before dispatch."
+        )
+    if type(expected_attempt) is not int or expected_attempt < 0:
+        raise InvalidTransitionError(
+            "Expected attempt must be a non-negative integer."
+        )
+    if not isinstance(now, datetime) or now.utcoffset() is None:
+        raise InvalidTransitionError("Submission time must be timezone-aware.")
+    if retry_until is not None and (
+        not isinstance(retry_until, datetime) or retry_until.utcoffset() is None
+    ):
+        raise InvalidTransitionError("Retry deadline must be timezone-aware.")
+    if operation.submission_attempts != expected_attempt:
+        return SubmissionPlan(operation, granted=False)
+    if operation.submission_attempts == 0:
+        if operation.state is not OperationState.RESERVED:
+            return SubmissionPlan(operation, granted=False)
+        return SubmissionPlan(
+            replace(
+                operation,
+                state=OperationState.SUBMITTING,
+                submitted_at=now,
+                submission_attempts=1,
+                retry_until=retry_until,
+                idempotency_scope=idempotency_scope,
+            ),
+            granted=True,
+        )
+    if (
+        operation.state
+        not in {OperationState.UNKNOWN, OperationState.SUBMITTING}
+        or operation.retry_until is None
+        or now >= operation.retry_until
+    ):
+        return SubmissionPlan(operation, granted=False)
+    return SubmissionPlan(
+        replace(
+            operation,
+            state=OperationState.SUBMITTING,
+            submission_attempts=operation.submission_attempts + 1,
+        ),
+        granted=True,
     )
 
 
@@ -339,7 +443,9 @@ def _settlement_update(
     )
 
     if operation_type is OperationType.PREPARE:
-        return PaymentUpdate(payment_event=PaymentEvent.PREPARED)
+        return PaymentUpdate(
+            payment_event=PaymentEvent.PREPARED, external_id=outcome.external_id
+        )
     if operation_type is OperationType.RELEASE_LOCK:
         return PaymentUpdate(payment_event=PaymentEvent.LOCK_RELEASED)
     if operation_type is OperationType.CANCEL_REFUND:
@@ -349,7 +455,13 @@ def _settlement_update(
         raise InvalidTransitionError(
             f"A succeeded {operation_type.value} needs a settled amount."
         )
-    validate_amount(settled, f"{operation_type.value} settled amount")
+    validate_amount(
+        settled,
+        f"{operation_type.value} settled amount",
+        allow_zero=False,
+        maximum=operation.resolved_amount,
+        maximum_name="reserved amount",
+    )
 
     if operation_type is OperationType.CHARGE:
         return PaymentUpdate(
@@ -362,42 +474,262 @@ def _settlement_update(
     )
 
 
+def _confirmed_refund_total(
+    operation: OperationRecord,
+    settled: Decimal,
+    operations: Iterable[OperationRecord],
+) -> Decimal:
+    """Combine each reserved baseline with independently proven later refunds.
+
+    An intent cannot have settled before its reservation existed. Thus each
+    starting total plus confirmed refunds reserved at/after that point is a
+    cumulative lower bound. Taking the greatest bound preserves historical
+    observations between older and newer intents, without counting a callback
+    twice. Do not add the result to current facts. The complete retained history
+    and atomically assigned reservation sequences are required for this proof.
+    """
+    refunds = [
+        record
+        for record in operations
+        if record.payment_id == operation.payment_id
+        and record.operation_type is OperationType.START_REFUND
+        and record.operation_id != operation.operation_id
+    ]
+    refunds.append(
+        replace(
+            operation, state=OperationState.SUCCEEDED, settled_amount=settled
+        )
+    )
+    confirmed = Decimal("0")
+    cumulative = Decimal("0")
+    for record in sorted(
+        refunds, key=lambda record: record.reservation_sequence, reverse=True
+    ):
+        if (
+            record.state is OperationState.SUCCEEDED
+            and record.settled_amount is not None
+        ):
+            confirmed += record.settled_amount
+        cumulative = max(cumulative, record.starting_refunded + confirmed)
+    return cumulative
+
+
 def plan_outcome(
     facts: PaymentFacts,
     operation: OperationRecord,
     outcome: OperationOutcome,
+    *,
+    operations: Iterable[OperationRecord] = (),
 ) -> OutcomePlan:
     """Plan the atomic recording of an operation outcome.
 
     The operation record and the financial facts it settles are returned
     together so the adapter commits them in one boundary. A nonterminal
     outcome -- including ``UNKNOWN`` -- moves no money and leaves the
-    operation discoverable as unresolved work.
+    operation discoverable as unresolved work. Late nonterminal evidence
+    cannot downgrade a terminal operation; contradictory terminal evidence
+    or correlation is retained in ``conflicting_outcomes`` and flags
+    reconciliation without overwriting established facts. Load the complete
+    retained ``operations`` in the same boundary:
+    cancellation success requires its target and returns it through
+    ``related_operations``; confirmed refunds establish a cumulative lower
+    bound even when cancellation let their reservation baselines overlap.
     """
-    current = operation.state
-    if current in TERMINAL_OPERATION_STATES:
-        if outcome.state is not current:
+    operations = tuple(operations)
+    if type(outcome.reconciliation_required) is not bool:
+        raise InvalidTransitionError(
+            "Outcome reconciliation_required must be a boolean."
+        )
+    for name in ("correlation", "external_id"):
+        value = getattr(outcome, name)
+        if value is not None and (
+            not isinstance(value, str) or not value.strip()
+        ):
             raise InvalidTransitionError(
-                f"Operation {operation.operation_id!r} is already "
-                f"{current.value!r} and cannot become "
-                f"{outcome.state.value!r}."
+                f"Outcome {name} must be a nonempty string."
             )
-        return OutcomePlan(operation=operation, facts=facts)
+    if (
+        outcome.external_id is not None
+        and operation.operation_type is not OperationType.PREPARE
+    ):
+        raise InvalidTransitionError(
+            "Only preparation supplies a payment external ID."
+        )
+    if outcome.state not in {
+        OperationState.SUCCEEDED,
+        OperationState.REJECTED,
+        OperationState.PROVIDER_PENDING,
+        OperationState.UNKNOWN,
+    }:
+        raise InvalidTransitionError(
+            "An outcome must describe provider evidence."
+        )
+    if outcome.settled_amount is not None and (
+        outcome.state is not OperationState.SUCCEEDED
+        or operation.operation_type
+        not in {OperationType.CHARGE, OperationType.START_REFUND}
+    ):
+        raise InvalidTransitionError(
+            "Only a confirmed capture or refund carries a settled amount."
+        )
+    if outcome.state is OperationState.SUCCEEDED:
+        _settlement_update(operation, outcome)
+    current = operation.state
+    settled = (
+        operation.resolved_amount
+        if outcome.settled_amount is None
+        else outcome.settled_amount
+    )
+    conflicting_correlation = (
+        operation.correlation is not None
+        and outcome.correlation is not None
+        and operation.correlation != outcome.correlation
+    )
+    contradictory_terminal = (
+        current in TERMINAL_OPERATION_STATES
+        and outcome.state in TERMINAL_OPERATION_STATES
+        and (
+            current is not outcome.state
+            or (
+                current is OperationState.SUCCEEDED
+                and settled != operation.settled_amount
+            )
+        )
+    )
+    conflicting_external_id = (
+        facts.external_id is not None
+        and outcome.external_id is not None
+        and facts.external_id != outcome.external_id
+    )
+    reconciliation = (
+        operation.reconciliation_required
+        or outcome.reconciliation_required
+        or conflicting_correlation
+        or conflicting_external_id
+        or contradictory_terminal
+    )
+    conflicts = operation.conflicting_outcomes
+    if (
+        conflicting_correlation
+        or conflicting_external_id
+        or contradictory_terminal
+    ):
+        # Store only normalized fields, never arbitrary provider payloads or
+        # additional attributes on a plugin's outcome subclass.
+        evidence = OperationOutcome(
+            state=outcome.state,
+            settled_amount=outcome.settled_amount,
+            correlation=outcome.correlation,
+            reconciliation_required=outcome.reconciliation_required,
+            external_id=outcome.external_id,
+        )
+        if evidence not in conflicts:
+            conflicts = (*conflicts, evidence)
+    recorded = replace(
+        operation,
+        correlation=operation.correlation or outcome.correlation,
+        reconciliation_required=reconciliation,
+        conflicting_outcomes=conflicts,
+    )
+    facts = replace(
+        facts,
+        reconciliation_required=facts.reconciliation_required or reconciliation,
+    )
+    if conflicting_correlation or conflicting_external_id:
+        return OutcomePlan(operation=recorded, facts=facts)
+    if outcome.external_id is not None:
+        facts = replace(facts, external_id=outcome.external_id)
+    cancelled_refund_settled = (
+        current is OperationState.REJECTED
+        and outcome.state is OperationState.SUCCEEDED
+        and operation.operation_type is OperationType.START_REFUND
+        and any(
+            candidate.operation_type is OperationType.CANCEL_REFUND
+            and candidate.state is OperationState.SUCCEEDED
+            and candidate.payment_id == operation.payment_id
+            and candidate.parameters.get(CANCELLATION_TARGET)
+            == operation.operation_id
+            for candidate in operations
+        )
+    )
+    if current in TERMINAL_OPERATION_STATES and not cancelled_refund_settled:
+        return OutcomePlan(operation=recorded, facts=facts)
+    # A cancellation can only stop the unexecuted part. A later correlated
+    # settlement proves returned funds even if the cancellation arrived first.
+    # Preserve the contradiction flag and record that financial fact.
 
-    settled_facts = facts
+    related: tuple[OperationRecord, ...] = ()
     if outcome.state is OperationState.SUCCEEDED:
         update = _settlement_update(operation, outcome)
-        settled_facts = _apply_to_facts(facts, update)
+        if operation.operation_type is OperationType.START_REFUND:
+            assert settled is not None  # validated by _settlement_update
+            update = replace(
+                update,
+                refunded_amount=_confirmed_refund_total(
+                    operation, settled, operations
+                ),
+            )
+        if operation.operation_type is OperationType.CANCEL_REFUND:
+            target_id = operation.parameters.get(CANCELLATION_TARGET)
+            target = next(
+                (
+                    record
+                    for record in operations
+                    if record.operation_id == target_id
+                    and record.operation_type is OperationType.START_REFUND
+                    and record.payment_id == facts.payment_id
+                ),
+                None,
+            )
+            if target is None:
+                raise OperationConflictError(
+                    "Cancellation target must be loaded atomically."
+                )
+            if target.is_active:
+                related = (replace(target, state=OperationState.REJECTED),)
+            update = replace(update, payment_event=None)
+        elif (
+            operation.operation_type is OperationType.RELEASE_LOCK
+            and facts.remaining_authorization == 0
+        ) or (
+            operation.operation_type is OperationType.PREPARE
+            and facts.status != PaymentStatus.NEW
+        ):
+            update = replace(update, payment_event=None)
+        facts = _apply_to_facts(facts, update)
+        recorded = replace(recorded, settled_amount=settled)
 
-    return OutcomePlan(
-        operation=replace(
-            operation,
-            state=outcome.state,
-            correlation=outcome.correlation or operation.correlation,
-            reconciliation_required=(
-                operation.reconciliation_required
-                or outcome.reconciliation_required
+    next_state = outcome.state
+    if (
+        current is OperationState.PROVIDER_PENDING
+        and next_state is OperationState.UNKNOWN
+    ):
+        next_state = current
+    recorded = replace(recorded, state=next_state)
+    if operation.operation_type in {
+        OperationType.START_REFUND,
+        OperationType.CANCEL_REFUND,
+    }:
+        replacements = {
+            record.operation_id: record for record in (recorded, *related)
+        }
+        current_operations = [
+            replacements.get(record.operation_id, record)
+            for record in operations
+        ]
+        current_operations.append(recorded)
+        refund_in_progress = any(
+            record.operation_type is OperationType.START_REFUND
+            and record.is_active
+            for record in current_operations
+        )
+        facts = replace(
+            facts,
+            status=project_payment_status(
+                cast("Payment", _FactsPayment(facts)),
+                refund_in_progress=refund_in_progress,
             ),
-        ),
-        facts=settled_facts,
+        )
+    return OutcomePlan(
+        operation=recorded, facts=facts, related_operations=related
     )

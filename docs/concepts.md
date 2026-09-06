@@ -1,5 +1,26 @@
 # Core Concepts
 
+## Durable Operation Intents
+
+`DurablePaymentFlow.execute_operation()` requires an application-assigned
+operation ID for each deliberate prepare, capture, authorization release,
+refund or refund cancellation. Retries use the same ID and immutable request;
+separate partial captures/refunds use new IDs. Reservation freezes the concrete
+amount and starting totals, then an atomic submission claim precedes provider
+I/O. See [Durable Storage Contract](durable-storage.md#durable-operation-dispatch)
+for processor capabilities, adapter upgrades and recovery.
+
+Operation state is separate from payment status: `RESERVED`, `SUBMITTING`,
+`PROVIDER_PENDING`, `SUCCEEDED`, `REJECTED` and nonterminal `UNKNOWN` describe
+one intent. Acceptance is not settlement. Unknown/pending operations block
+unrelated commands while observations and reconciliation remain available.
+The structured `OperationResult` reports operation identity, outcome, committed
+snapshot and reconciliation requirement. Retrying an uncertain command is not
+permission to submit it again, even after a crash or lease expiry.
+
+These guarantees belong to the explicit durable flow, **not** the released
+`PaymentFlow` API described in the legacy request/result sections below.
+
 ## Payment Statuses
 
 Payments move through these states:
@@ -215,12 +236,18 @@ therefore overwrite each other's committed amounts.
 class DurablePaymentRepository(Protocol):
     async def get_payment_facts(self, payment_id: str) -> PaymentFacts: ...
     async def reserve_operation(self, payment_id: str, intent: OperationIntent) -> OperationRecord: ...
+    async def claim_submission(
+        self, payment_id: str, operation_id: str, *, expected_attempt: int,
+        now: datetime, retry_until: datetime | None = None,
+        idempotency_scope: str | None = None,
+    ) -> SubmissionPlan: ...
     async def apply_observation(self, payment_id: str, update: PaymentUpdate | None) -> ObservationPlan: ...
     async def record_operation_outcome(
         self, payment_id: str, operation_id: str, outcome: OperationOutcome
     ) -> OutcomePlan: ...
     async def get_operation(self, payment_id: str, operation_id: str) -> OperationRecord | None: ...
     async def list_unresolved_operations(self) -> Sequence[OperationRecord]: ...
+    async def list_payments_requiring_reconciliation(self) -> Sequence[PaymentFacts]: ...
 ```
 
 Every operation addresses a payment by identity, applies core's rules to
@@ -258,10 +285,14 @@ GetPaidException
 ├── CredentialsError
 ├── InvalidCallbackError
 ├── InvalidTransitionError
+│   └── OperationEvidenceError
 ├── ReconciliationRequiredError
 ├── UnsupportedRepositoryError
+├── UnsupportedProcessorError
+├── OperationPersistenceError
 ├── StateConflictError
 ├── OperationConflictError
+│   └── ReconciliationBlockedError
 ├── ConformanceError
 └── BackendNotFoundError (also a KeyError)
 ```

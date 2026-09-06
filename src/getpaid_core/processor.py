@@ -2,8 +2,10 @@
 
 from abc import ABC
 from abc import abstractmethod
+from collections.abc import Mapping
 from collections.abc import Sequence
 from decimal import Decimal
+from typing import TYPE_CHECKING
 from typing import Any
 from typing import ClassVar
 
@@ -12,6 +14,13 @@ from getpaid_core.types import ChargeResult
 from getpaid_core.types import PaymentUpdate
 from getpaid_core.types import RefundResult
 from getpaid_core.types import TransactionResult
+
+
+if TYPE_CHECKING:
+    from getpaid_core.durable.provider import OperationCapabilities
+    from getpaid_core.durable.records import OperationOutcome
+    from getpaid_core.durable.records import OperationRecord
+    from getpaid_core.durable.records import OperationType
 
 
 class BaseProcessor(ABC):
@@ -29,6 +38,38 @@ class BaseProcessor(ABC):
     ) -> None:
         self.payment = payment
         self.config = dict(config or {})
+
+    operation_capabilities: ClassVar[
+        Mapping["OperationType", "OperationCapabilities"]
+    ] = {}
+
+    @classmethod
+    async def submit_operation(
+        cls, operation: "OperationRecord", *, config: Mapping[str, Any]
+    ) -> "OperationOutcome":
+        """Submit exactly the frozen intent, using its idempotency key.
+
+        Durable commands deliberately bypass the instance's mutable payment.
+        All request-specific inputs must come from the reservation, including
+        provider correlation for a targeted cancellation. Config supplies only
+        deployment settings/credentials, whose provider account must stay stable
+        throughout an intent's lifetime. Never read current balances to
+        construct a retry payload. Return normalized acceptance/settlement
+        evidence; communication uncertainty is not rejection.
+        """
+        raise NotImplementedError
+
+    @classmethod
+    async def lookup_operation(
+        cls, operation: "OperationRecord", *, config: Mapping[str, Any]
+    ) -> "OperationOutcome":
+        """Query evidence tied to this operation, not an arbitrary active one.
+
+        Ordinary not-found is UNKNOWN unless the declared lookup contract
+        conclusively excludes execution. Delta-only uncorrelated evidence must
+        return UNKNOWN with reconciliation_required, never guessed totals.
+        """
+        raise NotImplementedError
 
     def get_setting(self, name: str, default: Any = None) -> Any:
         """Read a setting from backend config."""

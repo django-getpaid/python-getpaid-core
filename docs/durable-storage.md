@@ -22,6 +22,7 @@ these, listed in `getpaid_core.durable.MANDATORY_OPERATIONS`:
 |-----------|---------|
 | `get_payment_facts(payment_id)` | Return the payment's current committed financial facts |
 | `reserve_operation(payment_id, intent)` | Commit a reservation against current facts; resume an identical intent instead of duplicating it |
+| `claim_submission(payment_id, operation_id, *, expected_attempt, now, retry_until=None, idempotency_scope=None)` | Atomically grant one submission attempt and persist `SUBMITTING` before provider I/O; compare the attempt counter, preserve the original retry window |
 | `apply_observation(payment_id, update)` | Apply a normalized observation to current state and return the committed plan |
 | `record_operation_outcome(payment_id, operation_id, outcome)` | Commit an operation's outcome together with the financial facts it settles |
 | `get_operation(payment_id, operation_id)` | Return one committed operation record |
@@ -31,8 +32,13 @@ these, listed in `getpaid_core.durable.MANDATORY_OPERATIONS`:
 Each of those calls is **one atomic boundary**. The payment's financial
 facts, the affected operation record and the replay evidence commit
 together or not at all. Core supplies the validation and transition rules
-that run inside it — `plan_observation`, `plan_reservation` and
-`plan_outcome` — so no adapter reimplements them.
+that run inside it — `plan_observation`, `plan_reservation`,
+`plan_submission` and `plan_outcome` — so no adapter reimplements them. Supply the complete
+retained operation history to `plan_outcome(..., operations=...)`, not only
+the active operation: distinct refunds can settle after a cancellation allowed
+another reservation against an overlapping baseline. Commit every
+`OutcomePlan.related_operations` record atomically, and commit the financial
+projection in `ReservationPlan.facts` together with a new reservation.
 
 `supports_durable_state(repository)` answers whether an adapter qualifies;
 `missing_durable_operations(repository)` names what is absent.
@@ -45,6 +51,37 @@ enumerated through `list_payments_requiring_reconciliation()` rather than
 through the operation list. Between the two, a restarted process finds
 its outstanding work from stored state, without an exception, a log line
 or a caller object.
+
+### Conflicting operation evidence
+
+`OperationRecord.conflicting_outcomes` is a tuple of normalized
+`OperationOutcome` values, empty by default. When an otherwise valid outcome
+contradicts an established terminal state/amount, operation correlation, or
+payment external ID, `plan_outcome` retains its allowlisted fields: `state`,
+`settled_amount`, `correlation`, `external_id`, and `reconciliation_required`.
+It stores neither raw provider payloads nor additional plugin attributes.
+The reconciliation flag must be an actual boolean; malformed values are rejected
+before any state is committed. An omitted settled amount retains its meaning
+against the frozen reservation.
+
+Commit this tuple with the operation, payment facts and reconciliation flags
+in the same `record_operation_outcome()` boundary. Distinct disputed values
+must survive subsequent writes and concurrent callers; equal normalized
+outcomes are retained only once. Reading `get_operation()` or enumerating
+`list_unresolved_operations()` must recover the evidence, not merely its flag.
+Disputes do not overwrite established money or handles. The existing correlated
+refund-settlement-after-cancellation rule still records confirmed returned
+funds while retaining the contradiction for reconciliation.
+
+This extends the unreleased next-major storage contract. Adapters must round-trip
+all five evidence fields and preserve the tuple on every operation write. Records
+created before this field existed may default it to `()`, but previously discarded
+evidence cannot be reconstructed that way. Upgrade storage/readers before enabling
+these writers; older writers must not erase the new field. Core never silently
+expires or truncates disputes; evidence archival requires an explicit integration
+retention policy, separate from provider idempotency windows. The conformance suite
+checks retention, redelivery and unchanged financial facts against adapter storage;
+it does not certify real database isolation or a provider.
 
 ## Optional, adapter-owned choices
 
@@ -96,6 +133,156 @@ There is deliberately no fallback to reading a snapshot and saving it
 unconditionally, and no capability sniffing that quietly picks a weaker
 path: an adapter that cannot make the guarantee must not move money in a
 way that claims it.
+
+## Durable operation dispatch
+
+Use `DurablePaymentFlow.execute_operation(payment_id, intent, *, now)` for
+`OperationType.PREPARE`, `CHARGE`, `RELEASE_LOCK`, `START_REFUND` and
+`CANCEL_REFUND`. All five use the same reservation/submission/outcome boundary;
+none invokes a legacy instance method as a fallback.
+
+```python
+from datetime import UTC, datetime
+from decimal import Decimal
+from getpaid_core.durable import OperationIntent, OperationType
+
+result = await flow.execute_operation(
+    payment_id,
+    OperationIntent("capture-installment-1", OperationType.CHARGE,
+                    amount=Decimal("30.00")),
+    now=datetime.now(UTC),
+)
+# Read result.operation_id, result.outcome, result.snapshot and
+# result.reconciliation_required, not a caller-owned Payment object.
+```
+
+The application supplies the operation ID, scoped to the payment. The same
+ID and normalized request retrieves the original intent; changed type, amount
+or parameters raises `OperationConflictError`. Use new IDs for deliberate
+subsequent partial captures/refunds. An omitted amount is resolved once during
+atomic reservation, after application validators, and never recalculated for
+a same-ID retry. Nested request parameters are copied into immutable values;
+nonfinite/unsupported values are refused. Mapping order and Decimal scale do
+not distinguish otherwise identical requests.
+
+Reservation preserves the starting captured/refunded/authorization totals,
+concrete amount, normalized parameters, provider backend and operation-specific
+idempotency key. It atomically assigns `reservation_sequence`, an increasing
+per-payment ordinal independent of worker clocks. Retain this ordinal with the
+complete operation history; do not reconstruct it from settlement timestamps. The submission claim freezes the first submission time, key
+scope and finite retry deadline. Adapters must persist **all** these fields,
+not only the request digest. An older experimental durable record missing its
+payload, reservation sequence or submission history cannot be reconstructed by
+guessing: reconcile
+it before enabling dispatch. Released 3.x migration still invents no intents.
+
+One active intent holds a payment in `RESERVED`, `SUBMITTING`,
+`PROVIDER_PENDING` or `UNKNOWN`. Duplicate calls do not submit independently;
+unrelated commands conflict. Unknown is nonterminal, not rejection. Callbacks
+and evidence recording continue while commands are blocked. Payment-level
+reconciliation also blocks new submission rights for previously reserved work,
+while retrieval and reconciliation remain available.
+
+`OperationResult` carries the operation record and committed `snapshot`.
+Acceptance does not move captured/refunded funds. Confirmed command effects
+become cumulative observations using the reservation's starting totals, not
+amounts added to a callback-updated snapshot. Never associate an external delta
+with an intent just because their amounts match. A plugin unable to establish
+trustworthy correlation must return `UNKNOWN` with `reconciliation_required`.
+
+### Processor upgrade
+
+Processors declare `operation_capabilities`, a mapping from `OperationType` to
+`OperationCapabilities`. A missing entry means unsupported. Each entry declares:
+
+- `idempotency_scope` and `idempotency_window` together, or neither. Document
+  the provider account/endpoint namespace and immutable payload comparison
+  rules. Keep the provider account/configuration stable for the intent's life.
+- `lookup_semantics`: `UNSUPPORTED`, `AUTHORITATIVE`, or
+  `AUTHORITATIVE_INCLUDING_ABSENCE`. Ordinary not-found is `UNKNOWN`. Only a
+  documented conclusive guarantee excluding both past and later execution can
+  normalize absence to `REJECTED`.
+
+Implement the classmethods `submit_operation(operation, *, config)` and, when
+lookup is declared, `lookup_operation(operation, *, config)`. Each returns
+`OperationOutcome`. No caller-owned payment instance reaches these methods.
+Construct the wire request only from the frozen `parameters`, `resolved_amount`
+and `idempotency_key`; operational fields such as attempt counter and current
+state are **not** request parameters. Currency, buyer/return information and
+other provider request inputs belong in the explicitly reserved parameters,
+not a later read of an order or payment. Do not independently retry requests
+inside a plugin outside the declared guarantee.
+
+Return operation-specific confirmed effects as `SUCCEEDED`, explicit refusal
+as `REJECTED`, acceptance without settlement as `PROVIDER_PENDING`, and
+uncertainty as `UNKNOWN`. Store safe handles in per-operation `correlation`;
+never overwrite a payment-wide refund ID. Preparation can return `external_id`
+for the payment's provider handle. Returned evidence is untrusted: no raw
+payload or arbitrary result representation is added to logs or public errors.
+Plugins must allowlist safe correlation handles rather than putting secrets
+in them. Core cannot verify a plugin's real provider capability claims.
+
+### Recovery and restricted mode
+
+A timeout, crash before transmission, or expired worker lease leaves the
+operation unresolved. Repeating `execute_operation` returns it without
+resubmitting. The application invokes
+`reconcile_operation(payment_id, operation_id, *, now, resubmit=False)` to
+query declared authoritative evidence; there is no scheduler in core.
+
+`resubmit=True` requests at most one new attempt, **after** lookup when
+available. A failed lookup does not authorize retry. The attempt still needs
+the original idempotency scope and a valid original window, also bounded by
+the current declaration. Core leaves a full `provider_timeout` of headroom
+(default 30 seconds) and counts all elapsed time, including repository claim
+acknowledgement, against the deadline. It checks again immediately before
+provider I/O, including a delayed first submission. A
+provider without lookup can safely replay only under that same valid key
+guarantee. An absent/expired guarantee, scope change, pending acceptance or
+reconciliation flag refuses resubmission. Neither local record retention nor
+a longer replacement capability declaration extends the original window.
+
+`now` must be an accurate timezone-aware application clock shared consistently
+across workers. Clock rollback is not a recovery strategy. Wrappers must bound
+clock error conservatively; plugins must honor the request timeout and ensure
+the provider receives retries within its declared guarantee. Core's asyncio
+call timeout cannot make a blocking or noncompliant plugin safe.
+
+If neither safe retry nor lookup is available, construction of the flow must
+explicitly opt that operation into `restricted_operations=frozenset({...})`.
+It may then submit **once**, retaining uncertainty after response loss. A
+process crash before transmission can leave it stuck; time cannot distinguish
+that from successful execution followed by lost acknowledgement. Operator
+resolution and authorization remain integration responsibilities.
+
+Pre-submission validation/conflict and storage failures remain exceptions.
+After I/O, `OperationEvidenceError` identifies invalid/inapplicable normalized
+evidence; `OperationPersistenceError` identifies a failed local outcome write.
+Both expose only operation/payment identity, type and safe known correlation
+and explicitly forbid blind provider resubmission. A failed final write leaves
+the earlier durable submission record discoverable even if no further write
+can succeed. Cancellation propagates and also leaves that anchor; this slice
+creates no detached cleanup tasks. Richer post-response recovery and bounded
+cancellation cleanup remain separate implementation work.
+
+### Refund cancellation
+
+Cancellation is a separate `CANCEL_REFUND` intent whose parameters name
+`target_operation_id`. It is the sole exception to exclusive mutation: the
+target must be a specific provider-pending refund with known correlation.
+Reservation freezes that target correlation for submission. Other commands
+remain blocked while either operation is uncertain. Confirmed cancellation
+resolves the unexecuted target without decreasing refunded funds; a racing
+settlement is preserved, not overwritten. A callback completing an operation
+before a late acceptance response cannot downgrade terminal state. Confirmed
+refund intents also establish cumulative lower bounds: each reserved starting
+total plus confirmed refunds reserved at or after that sequence. Take the greatest
+bound, so older history cannot discard intervening financial observations.
+This preserves separately completed refunds when an older
+cancelled refund settles late, without adding request amounts to callback-updated
+facts. Retain and supply the complete operation history for that calculation.
+Unknown external contributions still require trustworthy cumulative evidence;
+core does not infer their identity from equal amounts.
 
 ## Who owns replay evidence
 
@@ -280,6 +467,7 @@ adapter:
 | `handle_callback()` | Updates and saves the caller's payment, returns `None` | Commits to current state, returns `ObservationPlan` |
 | `fetch_and_update_status()` | Updates and saves the caller's payment, returns it | Commits to current state, returns `ObservationPlan` |
 | `reserve_operation()` / `record_operation_outcome()` | — | Returns the committed record or plan |
+| `execute_operation()` / `reconcile_operation()` | — | Durable command dispatch/recovery returns `OperationResult` |
 | Atomicity across workers | None claimed | Guaranteed by the adapter's boundary |
 
 `PaymentFlow` still makes none of the guarantees on this page, and nothing
@@ -302,15 +490,14 @@ and the two flows must not write the same payment state.
 
 These are deliberately absent here and tracked separately:
 
-- **Command dispatch and provider idempotency** — wiring `charge()`,
-  `start_refund()` and friends through reservations, submission rights
-  and provider idempotency keys. This layer supplies the reservation and
-  outcome mechanics those will use.
-- **What a processor receives** — the durable flow still builds the
-  processor from the caller's payment object, so a processor can read
-  stale financial fields from it even though nothing is written back.
-  Giving processors operation identity and immutable submission
-  parameters instead is part of the command-dispatch work.
+- **Legacy callback/PULL processor input** — these observation parsers still
+  receive the caller's payment object. Durable command classmethods receive
+  the frozen operation instead. Cross-channel callback correlation is separate
+  work; do not infer it merely from the currently active operation.
+- **Complete recovery policy** — richer post-response recovery evidence,
+  cancellation-aware bounded cleanup and auditable operator-resolution APIs
+  remain follow-on work. No recovery scheduler, database adapter or operator
+  authorization system is implemented here.
 - **Cross-channel observation reconciliation** — deciding what a stale
   or contradictory cumulative snapshot means when it arrives during or
   after a refund. Transitions here run the shared state engine, which
