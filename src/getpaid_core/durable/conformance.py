@@ -537,7 +537,7 @@ async def check_submission_right_is_exclusive(
 async def check_observations_commit_operations_and_disputes(
     factory: RepositoryFactory,
 ) -> None:
-    """Observation commits include correlated operations and rejected evidence."""
+    """Commit correlated operations and rejected evidence with observations."""
     repository = await factory(_authorized_facts())
     await repository.reserve_operation(
         PAYMENT_ID, OperationIntent("capture", OperationType.CHARGE)

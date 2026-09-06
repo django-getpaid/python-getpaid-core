@@ -24,6 +24,7 @@ from getpaid_core.durable.records import ACTIVE_OPERATION_STATES
 from getpaid_core.durable.records import CANCELLATION_TARGET
 from getpaid_core.durable.records import LEGACY_REPLAY_METADATA_KEYS
 from getpaid_core.durable.records import TERMINAL_OPERATION_STATES
+from getpaid_core.durable.records import ObservationConflict
 from getpaid_core.durable.records import ObservationPlan
 from getpaid_core.durable.records import OperationIntent
 from getpaid_core.durable.records import OperationOutcome
@@ -32,6 +33,7 @@ from getpaid_core.durable.records import OperationState
 from getpaid_core.durable.records import OperationType
 from getpaid_core.durable.records import OutcomePlan
 from getpaid_core.durable.records import PaymentFacts
+from getpaid_core.durable.records import PaymentObservation
 from getpaid_core.durable.records import ReplayRecord
 from getpaid_core.durable.records import ReservationPlan
 from getpaid_core.durable.records import SubmissionPlan
@@ -66,6 +68,7 @@ __all__ = [
     "LookupSemantics",
     "MigrationFinding",
     "MigrationPlan",
+    "ObservationConflict",
     "ObservationPlan",
     "OperationCapabilities",
     "OperationIntent",
@@ -76,6 +79,7 @@ __all__ = [
     "OperationType",
     "OutcomePlan",
     "PaymentFacts",
+    "PaymentObservation",
     "ReplayRecord",
     "RepositoryFactory",
     "ReservationPlan",

@@ -84,8 +84,12 @@ class DurablePaymentRepository(Protocol):
     ) -> ObservationPlan:
         """Apply a normalized observation to current durable state.
 
-        Returns the committed plan: the facts as stored after the call
-        and the replay evidence committed with them.
+        Load current facts, replay records and complete retained operation
+        history inside the same boundary; pass history as ``operations`` to
+        ``plan_observation``. Commit returned facts (including retained
+        ``observation_conflicts``), replay evidence and every entry in
+        ``ObservationPlan.operations`` atomically, even when ``applied`` is
+        false. Never discard dispute records on subsequent writes.
         """
         ...
 
