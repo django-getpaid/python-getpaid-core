@@ -23,6 +23,7 @@ from datetime import datetime
 from datetime import timedelta
 from typing import Any
 
+from getpaid_core.durable.provider import LookupSemantics
 from getpaid_core.durable.provider import OperationCapabilities
 from getpaid_core.durable.provider import OperationResult
 
@@ -35,6 +36,8 @@ from getpaid_core.durable.records import OperationType
 from getpaid_core.durable.records import OutcomePlan
 from getpaid_core.durable.repository import DurablePaymentRepository
 from getpaid_core.durable.repository import require_durable_state
+from getpaid_core.exceptions import CommunicationError
+from getpaid_core.exceptions import OperationConflictError
 from getpaid_core.exceptions import UnsupportedProcessorError
 from getpaid_core.flow import BaseFlow
 from getpaid_core.flow import OperationValidator
@@ -114,12 +117,45 @@ class DurablePaymentFlow(BaseFlow):
         )
         if not claim.granted:
             return await self._operation_result(claim.operation)
-        async with asyncio.timeout(self.provider_timeout):
-            outcome = await processor.submit_operation(
-                claim.operation, config=self.config.get(facts.backend, {})
-            )
+        return await self._submit(processor, claim.operation)
+
+    async def _submit(self, processor: Any, operation: OperationRecord) -> OperationResult:
+        try:
+            async with asyncio.timeout(self.provider_timeout):
+                outcome = await processor.submit_operation(
+                    operation, config=self.config.get(operation.backend, {})
+                )
+        except (TimeoutError, CommunicationError):
+            outcome = OperationOutcome(OperationState.UNKNOWN)
         plan = await self.repository.record_operation_outcome(
-            payment_id, operation.operation_id, outcome
+            operation.payment_id, operation.operation_id, outcome
+        )
+        return OperationResult(plan.operation, plan.facts)
+
+    async def reconcile_operation(
+        self, payment_id: str, operation_id: str, *, now: datetime
+    ) -> OperationResult:
+        """Look up evidence for an existing intent without inventing a new one."""
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("now must be timezone-aware.")
+        operation = await self.repository.get_operation(payment_id, operation_id)
+        if operation is None:
+            raise OperationConflictError("No reserved operation with that identity.")
+        if not operation.is_active or operation.state is OperationState.RESERVED:
+            return await self._operation_result(operation)
+        processor = self.registry.get_by_slug(operation.backend)
+        capability = self._capability(processor, operation.operation_type)
+        if capability.lookup_semantics is LookupSemantics.UNSUPPORTED:
+            return await self._operation_result(operation)
+        try:
+            async with asyncio.timeout(self.provider_timeout):
+                outcome = await processor.lookup_operation(
+                    operation, config=self.config.get(operation.backend, {})
+                )
+        except (TimeoutError, CommunicationError):
+            outcome = OperationOutcome(OperationState.UNKNOWN)
+        plan = await self.repository.record_operation_outcome(
+            payment_id, operation_id, outcome
         )
         return OperationResult(plan.operation, plan.facts)
 

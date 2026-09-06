@@ -3,6 +3,8 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import asyncio
+
 import pytest
 
 from getpaid_core import PluginRegistry
@@ -62,6 +64,42 @@ async def test_sequential_retry_returns_the_pending_intent_without_resubmitting(
     assert second.outcome is OperationState.PROVIDER_PENDING
     assert second.snapshot.captured_funds == 0
     assert (await repository.get_operation("pay", "capture")).correlation == "charge-1"
+
+
+async def test_response_loss_is_unknown_then_authoritative_lookup_settles_once():
+    from getpaid_core.durable.provider import LookupSemantics, OperationCapabilities
+
+    calls = []
+    lookups = []
+
+    class LostResponse(MockProcessor):
+        operation_capabilities = {OperationType.CHARGE: OperationCapabilities(
+            idempotency_scope="merchant", idempotency_window=timedelta(hours=1),
+            lookup_semantics=LookupSemantics.AUTHORITATIVE,
+        )}
+
+        @classmethod
+        async def submit_operation(cls, operation, *, config):
+            calls.append(operation)
+            raise TimeoutError("response lost after provider transaction")
+
+        @classmethod
+        async def lookup_operation(cls, operation, *, config):
+            lookups.append(operation)
+            return OperationOutcome(OperationState.SUCCEEDED, correlation="charge-1")
+
+    repository, flow = make_flow(LostResponse)
+    intent = OperationIntent("capture", OperationType.CHARGE)
+    result = await flow.execute_operation("pay", intent, now=NOW)
+    assert result.outcome is OperationState.UNKNOWN
+    assert result.snapshot.captured_funds == 0
+    duplicate = await flow.execute_operation("pay", intent, now=NOW)
+    assert duplicate.outcome is OperationState.UNKNOWN
+    result = await flow.reconcile_operation("pay", "capture", now=NOW)
+    assert result.outcome is OperationState.SUCCEEDED
+    assert result.snapshot.captured_funds == Decimal("100")
+    assert len(calls) == len(lookups) == 1
+    assert await repository.list_unresolved_operations() == ()
 
 
 def make_flow(processor, *, repository=None, **options):
