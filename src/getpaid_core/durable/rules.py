@@ -109,7 +109,12 @@ def _apply_to_facts(facts: PaymentFacts, update: PaymentUpdate) -> PaymentFacts:
     apply_payment_update(
         cast("Payment", view), replace(update, provider_event_id=None)
     )
-    return view.to_facts()
+    result = view.to_facts()
+    if result.captured_funds > facts.captured_funds and (
+        facts.refunded_funds > 0 or facts.status == PaymentStatus.REFUND_STARTED
+    ):
+        result = replace(result, reconciliation_required=True)
+    return result
 
 
 def plan_observation(

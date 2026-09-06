@@ -374,49 +374,44 @@ class TestCaptureEvidenceIsNotACaptureCommand:
         assert payment.amount_locked == Decimal("20.00")
         assert payment.status == PaymentStatus.PARTIALLY_REFUNDED
 
-    def test_capture_evidence_on_a_fully_returned_payment_still_raises(
+    def test_capture_evidence_on_a_fully_returned_payment_is_absorbed(
         self,
     ) -> None:
-        """Unchanged from the released contract.
-
-        ADR 0001, section 5 wants this recorded with a reconciliation
-        requirement instead of refused; that needs reconciliation
-        machinery this slice does not own.
-        """
+        """An equal cumulative total does not reopen a returned payment."""
         payment = MockPayment(
             status=PaymentStatus.REFUNDED,
             amount_paid=Decimal("100.00"),
             amount_refunded=Decimal("100.00"),
         )
 
-        with pytest.raises(
-            InvalidTransitionError, match=r"captured funds were all"
-        ):
-            apply_payment_update(
-                payment,
-                PaymentUpdate(
-                    payment_event=PaymentEvent.PAYMENT_CAPTURED,
-                    paid_amount=Decimal("100.00"),
-                ),
-            )
+        apply_payment_update(
+            payment,
+            PaymentUpdate(
+                payment_event=PaymentEvent.PAYMENT_CAPTURED,
+                paid_amount=Decimal("100.00"),
+            ),
+        )
+        assert payment.status == PaymentStatus.REFUNDED
+        assert payment.amount_refunded == Decimal("100.00")
 
-    def test_capture_evidence_while_a_refund_is_unresolved_raises(
+    def test_capture_evidence_while_a_refund_is_unresolved_is_absorbed(
         self,
     ) -> None:
-        """Unchanged from the released contract."""
+        """A capture snapshot cannot clear unresolved refund progress."""
         payment = MockPayment(
             status=PaymentStatus.REFUND_STARTED,
             amount_paid=Decimal("100.00"),
         )
 
-        with pytest.raises(InvalidTransitionError, match="refund is unresolved"):
-            apply_payment_update(
-                payment,
-                PaymentUpdate(
-                    payment_event=PaymentEvent.PAYMENT_CAPTURED,
-                    paid_amount=Decimal("100.00"),
-                ),
-            )
+        apply_payment_update(
+            payment,
+            PaymentUpdate(
+                payment_event=PaymentEvent.PAYMENT_CAPTURED,
+                paid_amount=Decimal("100.00"),
+            ),
+        )
+        assert payment.status == PaymentStatus.REFUND_STARTED
+        assert payment.amount_paid == Decimal("100.00")
 
 
 class TestStatusProjection:
