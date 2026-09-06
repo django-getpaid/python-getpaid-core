@@ -573,6 +573,12 @@ async def test_correlated_refund_cancellation_race_preserves_returned_funds(
     ).state == OperationState.SUCCEEDED
 
 
+def test_empty_durable_envelope_is_semantically_the_same_observation():
+    plain = PaymentUpdate(paid_amount=Decimal("40"))
+    durable = PaymentObservation(paid_amount=Decimal("40.00"))
+    assert observation_digest(plain) == observation_digest(durable)
+
+
 def test_replay_identity_preserves_precise_amounts_under_decimal_context():
     with localcontext() as context:
         context.prec = 6

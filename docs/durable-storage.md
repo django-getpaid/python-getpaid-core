@@ -34,9 +34,11 @@ facts, the affected operation record and the replay evidence commit
 together or not at all. Core supplies the validation and transition rules
 that run inside it — `plan_observation`, `plan_reservation`,
 `plan_submission` and `plan_outcome` — so no adapter reimplements them. Supply the complete
-retained operation history to `plan_outcome(..., operations=...)`, not only
-the active operation: distinct refunds can settle after a cancellation allowed
-another reservation against an overlapping baseline. Commit every
+retained operation history to both `plan_observation(..., operations=...)` and
+`plan_outcome(..., operations=...)`, not only the active operation. Commit all
+`ObservationPlan.operations` with its facts and replay record, even when
+`applied` is false. History matters because distinct refunds can settle after a
+cancellation allowed another reservation against an overlapping baseline. Commit every
 `OutcomePlan.related_operations` record atomically, and commit the financial
 projection in `ReservationPlan.facts` together with a new reservation.
 
@@ -59,6 +61,12 @@ or a caller object.
 contradicts an established terminal state/amount, operation correlation, or
 payment external ID, `plan_outcome` retains its allowlisted fields: `state`,
 `settled_amount`, `correlation`, `external_id`, and `reconciliation_required`.
+It also retains finite impossible settled amounts (zero, negative or above the
+reserved amount) and settlement evidence whose derived cumulative totals violate
+financial bounds. These disputes flag reconciliation while preserving established
+money and the prior operation state; they do not pretend settlement succeeded.
+Malformed types, nonfinite amounts and truly impossible lifecycle evidence still
+raise atomically rather than becoming disputes.
 It stores neither raw provider payloads nor additional plugin attributes.
 The reconciliation flag must be an actual boolean; malformed values are rejected
 before any state is committed. An omitted settled amount retains its meaning
@@ -284,6 +292,65 @@ facts. Retain and supply the complete operation history for that calculation.
 Unknown external contributions still require trustworthy cumulative evidence;
 core does not infer their identity from equal amounts.
 
+## Cross-channel observation reconciliation
+
+Processors can return `PaymentObservation`, a `PaymentUpdate` subclass defined
+in `getpaid_core.durable.records`, from callback and polling normalization.
+Its optional `outcome` is an `OperationOutcome`: operation-specific evidence is
+separate from the payment's cumulative `paid_amount` and `refunded_amount`.
+Supply `operation_id` only from an authenticated provider echo of the merchant's
+operation identity. Alternatively, `outcome.correlation` must uniquely match a
+retained provider handle in the same stored payment/backend context. Core cannot
+authenticate a plugin's assertion. Neither an equal amount nor the currently
+active operation establishes correlation. Uncorrelated aggregate money can update
+financial facts but cannot complete an operation; an uncorrelated outcome is
+retained and requires reconciliation.
+
+Set `delta_only=True` for delta-only evidence. Delta fields never accumulate
+directly into current totals. A trustworthy correlated outcome derives cumulative
+money from the frozen reservation and complete retained operation history;
+without that proof, core retains the normalized evidence and requires
+reconciliation rather than guessing a total. Ordinary cumulative observations
+apply independently supplied captured and refunded totals, even when one event
+label accompanies both. A stale money field does not suppress other valid
+information in the observation.
+
+Equal/lower captures preserve money and pending, partial or full refund progress,
+including deliveries with different or missing event identities. Genuinely
+increased capture during or after refund is recorded within financial bounds,
+preserves refunded funds, and flags reconciliation. That flag blocks new
+reservations and submission rights, not observations or outcome recording. Core
+never issues a compensating refund. For example, required=120 and
+captured=100/refunded=100 becoming captured=120/refunded=100 projects
+`PARTIALLY_REFUNDED`; an active refund still takes status precedence.
+
+A `LOCK_RELEASED` observation must explicitly identify authorization-only release
+with `cancellation_scope=OperationType.RELEASE_LOCK`, or provide a correlated
+operation outcome. Scoped release removes only remaining authorization: it cannot
+refund captured funds or cancel a pending refund. Ambiguous cancellation is
+retained and flags reconciliation instead of cancelling an arbitrary active
+refund. Correlated `CANCEL_REFUND` outcomes use the existing
+[explicit target semantics](#refund-cancellation), preserving racing settlement.
+
+### Retained observation conflicts
+
+`PaymentFacts.observation_conflicts` is a tuple of immutable `ObservationConflict`
+records, defaulting to `()`. Each contains `event_identity` (possibly `None`),
+`reason`, and `semantic_content`: immutable JSON of allowlisted normalized
+semantic fields, not raw `provider_data` or arbitrary plugin attributes. The
+record preserves the disputed claim, not merely a digest. Reasons include
+`financial_constraints`, `conflicting_identity`, `unresolved_delta`,
+`uncorrelated_outcome`, `conflicting_delta`, and `ambiguous_cancellation`. Equal records are retained
+once; later writes must preserve distinct evidence.
+
+Finite but impossible financial claims are retained here with reconciliation
+required, without forcing them into balances. Malformed types, nonfinite money,
+invalid metadata and truly impossible lifecycle transitions still raise before
+commit. This is not blanket suppression of transition errors. Commit retained
+conflicts even if `ObservationPlan.applied` is false; discover them through
+`list_payments_requiring_reconciliation()`. Operation-specific disputes remain in
+`OperationRecord.conflicting_outcomes`.
+
 ## Who owns replay evidence
 
 Replay bookkeeping is core-owned and lives in `ReplayRecord`, in storage
@@ -307,8 +374,9 @@ A `ReplayRecord` is compared on two things:
 
 Same scope and same content is a genuine duplicate: idempotent, nothing
 applied. Same scope and *different* content is conflicting reuse: core
-refuses to apply it and flags the payment for reconciliation rather than
-letting a reused identity silently suppress a financial change.
+refuses to apply it, retains its normalized content in `observation_conflicts`,
+and flags the payment for reconciliation rather than letting a reused identity
+silently suppress a financial change.
 
 `provider_data` keys that look like the old bookkeeping —
 `getpaid_core.durable.LEGACY_REPLAY_METADATA_KEYS` names them — are kept
@@ -322,6 +390,33 @@ is not a mapping, a non-string key, or a non-string event identity. The
 refusal happens before anything is planned, so the adapter's boundary
 commits nothing and both committed funds and committed history survive
 it intact.
+
+## Upgrading pre-release durable records
+
+Observation digests now hash normalized JSON with explicit field boundaries,
+not delimiter-joined fields. The JSON includes the durable correlation, outcome,
+delta and cancellation-scope fields when present; raw provider metadata remains
+excluded. Existing **pre-release durable replay digests are incompatible**.
+
+Stop and coordinate all durable writers before this upgrade. Back up the retained
+facts, operation and replay records. Offline, re-key existing replay digests from
+the **original normalized evidence** using the new representation, preserving
+event scope and history. A digest alone cannot reconstruct that evidence. If it
+is unavailable, mutation-block affected payments and reconcile before resuming;
+never blindly discard old trusted history or treat old events as unseen. Do not
+mix old/new digest writers, or roll back to writers that erase new evidence fields.
+
+Adapters must round-trip `PaymentFacts.observation_conflicts` and every field of
+its records, retain `OperationRecord.conflicting_outcomes`, load complete retained
+operation history in the observation boundary, and atomically persist every
+`ObservationPlan.operations` entry with facts and replay evidence. Old records
+may default the new tuple to `()`, but that does not recover previously lost
+evidence or solve digest migration. Verify retained evidence and event identities
+survive read-back before enabling new writers. Storage migrations and operational
+cutover remain adapter responsibilities, not a shipped migration tool in core.
+
+This pre-release durable upgrade is separate from the released 3.x migration
+below: existing trusted durable history must not be demoted to legacy metadata.
 
 ## Migrating released 3.x records
 
@@ -399,8 +494,8 @@ under live legacy traffic. Reads may continue throughout.
 
 ## Retention
 
-Operation and replay records are compact and are kept for the payment's
-**supported lifetime**, with no automatic expiry in this contract.
+Operation, replay and observation-conflict records are compact and kept for the
+payment's **supported lifetime**, with no automatic expiry in this contract.
 Deduplication that expires is deduplication that stops working, and an
 operation record is the recovery anchor for an outcome that was never
 established.
@@ -481,7 +576,10 @@ their financial fields are never written back.
 
 Upgrading an integration therefore means: implement the mandatory
 operations, pass the conformance suite, switch to `DurablePaymentFlow`,
-and read the returned `ObservationPlan` instead of the payment object.
+and read the returned `ObservationPlan` instead of the payment object. Persist
+its `operations` atomically with facts/replay and preserve the new
+`observation_conflicts` facts field. Existing pre-release durable integrations
+also require the [digest and record upgrade](#upgrading-pre-release-durable-records).
 The ADR additionally requires a coordinated writer cutover — old
 unconditional-save workers must stop before new-contract writes begin,
 and the two flows must not write the same payment state.
@@ -492,14 +590,13 @@ These are deliberately absent here and tracked separately:
 
 - **Legacy callback/PULL processor input** — these observation parsers still
   receive the caller's payment object. Durable command classmethods receive
-  the frozen operation instead. Cross-channel callback correlation is separate
-  work; do not infer it merely from the currently active operation.
+  the frozen operation instead. `PaymentObservation` supplies cross-channel
+  correlation mechanics, but each plugin must normalize authenticated evidence;
+  never infer correlation merely from the currently active operation.
 - **Complete recovery policy** — richer post-response recovery evidence,
   cancellation-aware bounded cleanup and auditable operator-resolution APIs
   remain follow-on work. No recovery scheduler, database adapter or operator
   authorization system is implemented here.
-- **Cross-channel observation reconciliation** — deciding what a stale
-  or contradictory cumulative snapshot means when it arrives during or
-  after a refund. Transitions here run the shared state engine, which
-  already projects the ADR's status precedence and its partial-capture
-  eligibility rules; correlating competing evidence is separate work.
+- **Real adapter/provider assurance and the complete ADR** — these landed
+  reconciliation mechanics do not establish database isolation, authenticate a
+  real provider's evidence, or claim the entire accepted ADR has shipped.

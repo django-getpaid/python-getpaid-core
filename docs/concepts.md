@@ -21,6 +21,50 @@ permission to submit it again, even after a crash or lease expiry.
 These guarantees belong to the explicit durable flow, **not** the released
 `PaymentFlow` API described in the legacy request/result sections below.
 
+## Durable Observations and Reconciliation
+
+A cumulative observation reports what has happened, not a new command.
+`PaymentObservation` extends `PaymentUpdate` with optional operation evidence:
+`operation_id` must come from an authenticated provider echo, or
+`outcome.correlation` must uniquely match a retained provider handle. The `outcome`
+is an `OperationOutcome`; aggregate totals, equal amounts and the currently active
+intent never establish which operation completed.
+
+With `delta_only=True`, delta fields are never added directly to current money.
+A correlated outcome establishes cumulative money using the frozen reservation
+and complete retained operation history. Otherwise core retains normalized
+evidence and requires reconciliation instead of guessing. Independently supplied
+captured and refunded totals both apply, regardless of their single event label.
+
+Equal/lower capture observations preserve pending, partial and full refund
+progress, even with different or missing event identities. A genuinely increased
+capture during or after refund is recorded when within financial bounds,
+without reducing refunded funds. It requires reconciliation and blocks new
+reservations/submission rights; it never triggers an automatic compensating
+refund. Refunding still does not authorize a new capture command.
+
+Cancellation must say what it cancels. A `LOCK_RELEASED` observation with
+`cancellation_scope=OperationType.RELEASE_LOCK` releases only remaining
+authorization, never captured funds or a pending refund. Ambiguous cancellation
+is retained for reconciliation; correlated refund-cancellation outcomes use the
+reserved explicit target and preserve racing settlement.
+
+Finite impossible money is retained for investigation, not forced into balances:
+`PaymentFacts.observation_conflicts` stores immutable allowlisted semantic JSON,
+reason and event identity, without raw metadata. Operation-specific impossible
+settlement amounts or cumulative bounds are retained in
+`OperationRecord.conflicting_outcomes`, preserving established money and the prior
+operation state. Malformed types, nonfinite values and truly impossible lifecycle
+transitions still raise atomically. Compact evidence has no automatic expiry.
+
+Adapters must supply complete retained history to `plan_observation` and commit
+all `ObservationPlan.operations` atomically with facts and replay evidence,
+including retained conflicts. Existing pre-release durable digests need a
+[coordinated offline upgrade](durable-storage.md#upgrading-pre-release-durable-records)
+from original normalized evidence, or mutation-blocking/reconciliation when it is
+unavailable; never discard trusted history blindly. This is separate from legacy
+3.x migration and does not claim real-provider or full-ADR assurance.
+
 ## Payment Statuses
 
 Payments move through these states:
@@ -86,9 +130,10 @@ follows the payment's current facts rather than the status it happens to hold.
 - Capture *commands* are refused once any refund is unresolved or any funds
   have been returned: refunding does not reopen capture capacity, and
   collecting replacement funds requires a **new payment**. Incoming capture
-  *evidence* is judged more narrowly — an equal or lower cumulative total
-  reported alongside refund progress is absorbed without regressing either
-  total — because recording what already happened is not authorizing it.
+  *evidence* is different: equal/lower cumulative totals preserve refund progress,
+  including pending and full refunds. Valid increased captures are recorded, not
+  refused merely because a refund exists; the durable planner additionally flags
+  reconciliation. Recording what happened is not authorizing another capture.
 - Refunds need captured funds not yet returned, so a partially refunded payment
   stays refundable down to zero.
 - Releasing needs a positive remaining authorization, in any status. It removes
@@ -103,7 +148,7 @@ strings, floats, or integers. Stored balances must satisfy
 `0 <= amount_refunded <= amount_paid <= amount_required` and
 `0 <= amount_locked <= amount_required - amount_paid`.
 
-#### Requests and results
+#### Legacy requests and results
 
 After application operation validators run, `PaymentFlow` validates charge,
 refund, and lock-release amounts before constructing or calling the processor,
@@ -128,7 +173,10 @@ already happened: do not blindly retry. Inspect provider state and reconcile;
 local rejection cannot undo a remote action. Result evidence is untrusted
 provider data and must not be logged or exposed indiscriminately.
 
-#### Incoming snapshots
+#### Legacy incoming snapshots
+
+The following describes `PaymentFlow` snapshot validation. The durable boundary
+instead retains finite impossible money as disputed evidence, as described above.
 
 - `locked_amount` is an explicit, positive remaining authorization, bounded by
   `amount_required - amount_paid`. `LOCKED` cannot create `PRE_AUTH` with zero or
@@ -139,8 +187,8 @@ provider data and must not be logged or exposed indiscriminately.
   `amount_paid`. Captured increments reduce `amount_locked`.
 - Within permitted lifecycle transitions, a lower valid cumulative snapshot
   preserves the larger recorded total. Negative and non-finite values are invalid,
-  not stale observations. This does not change capture/refund eligibility or
-  permit capture after funds have been returned.
+  not stale observations. This does not change command eligibility: recording
+  capture evidence after funds have been returned does not permit a new capture.
 - Every supplied financial field is validated, including fields on metadata-only
   updates. Invalid updates roll back amounts, status, external ID, fraud state,
   metadata, and the provider event ID. Already-applied event IDs remain no-op
@@ -319,6 +367,8 @@ raise ChargeFailure("Gateway returned 500", context={"status_code": 500})
 | `ItemInfo` | TypedDict with `name`, `quantity`, `unit_price` |
 | `ChargeResult` | Dataclass with `amount_charged`, `success`, `async_call`, `provider_data` |
 | `PaymentUpdate` | Dataclass describing semantic payment/fraud events and amounts |
+| `PaymentObservation` | Durable `PaymentUpdate` subclass with correlated outcome, delta and cancellation scope fields |
+| `ObservationConflict` | Immutable retained normalized observation JSON, event identity and reason |
 | `RefundResult` | Dataclass with refund amount and provider metadata |
 | `TransactionResult` | Dataclass with redirect, method, external ID, and provider metadata |
 

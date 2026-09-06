@@ -330,7 +330,12 @@ def observation_content(update: PaymentUpdate) -> str:
         update.external_id or "",
         update.fraud_message or "",
     )
-    if isinstance(update, PaymentObservation):
+    if isinstance(update, PaymentObservation) and (
+        update.operation_id is not None
+        or update.outcome is not None
+        or update.cancellation_scope is not None
+        or update.delta_only
+    ):
         outcome = update.outcome
         parts += (
             update.operation_id or "",
