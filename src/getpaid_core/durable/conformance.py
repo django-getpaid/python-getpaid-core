@@ -46,6 +46,7 @@ from getpaid_core.durable.records import OperationOutcome
 from getpaid_core.durable.records import OperationState
 from getpaid_core.durable.records import OperationType
 from getpaid_core.durable.records import PaymentFacts
+from getpaid_core.durable.records import PaymentObservation
 from getpaid_core.durable.repository import DurablePaymentRepository
 from getpaid_core.enums import PaymentEvent
 from getpaid_core.enums import PaymentStatus
@@ -533,6 +534,47 @@ async def check_submission_right_is_exclusive(
     _require(not expired.granted, "expiry authorized blind resubmission")
 
 
+async def check_observations_commit_operations_and_disputes(
+    factory: RepositoryFactory,
+) -> None:
+    """Observation commits include correlated operations and rejected evidence."""
+    repository = await factory(_authorized_facts())
+    await repository.reserve_operation(
+        PAYMENT_ID, OperationIntent("capture", OperationType.CHARGE)
+    )
+    callback = PaymentObservation(
+        payment_event=PaymentEvent.PAYMENT_CAPTURED,
+        paid_amount=REQUIRED,
+        operation_id="capture",
+        outcome=OperationOutcome(OperationState.SUCCEEDED),
+        provider_event_id="callback",
+    )
+    await repository.apply_observation(PAYMENT_ID, callback)
+    stored = await repository.get_operation(PAYMENT_ID, "capture")
+    _require(
+        stored is not None and stored.state is OperationState.SUCCEEDED,
+        "callback completion was not committed with financial facts",
+    )
+    await repository.record_operation_outcome(
+        PAYMENT_ID, "capture", OperationOutcome(OperationState.PROVIDER_PENDING)
+    )
+    replayed = await repository.apply_observation(PAYMENT_ID, callback)
+    _require(not replayed.applied, "callback replay evidence was not committed")
+    await repository.apply_observation(
+        PAYMENT_ID, _capture("1000.00", "impossible")
+    )
+    facts = await repository.get_payment_facts(PAYMENT_ID)
+    _require(facts.captured_funds == REQUIRED, "impossible money was committed")
+    _require(
+        facts.reconciliation_required and bool(facts.observation_conflicts),
+        "disputed observation was not retained with reconciliation requirement",
+    )
+    _require(
+        "1000" in facts.observation_conflicts[0].semantic_content,
+        "disputed observation lost its financial claim",
+    )
+
+
 #: The checks an adapter must pass, in the order the suite runs them.
 CONFORMANCE_CHECKS: tuple[
     tuple[str, Callable[[RepositoryFactory], Awaitable[None]]], ...
@@ -584,6 +626,10 @@ CONFORMANCE_CHECKS: tuple[
     (
         "reconciliation_blocks_new_commands",
         check_reconciliation_blocks_new_commands,
+    ),
+    (
+        "observations_commit_operations_and_disputes",
+        check_observations_commit_operations_and_disputes,
     ),
 )
 

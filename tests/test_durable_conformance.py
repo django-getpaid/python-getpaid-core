@@ -76,7 +76,23 @@ def test_the_suite_has_checks_for_every_required_race():
         "reconciliation_blocks_new_commands",
         "submission_right_is_exclusive",
         "conflicting_outcomes_are_retained",
+        "observations_commit_operations_and_disputes",
     }
+
+
+async def test_conformance_rejects_dropped_observation_operations():
+    class DroppedOperations(InMemoryDurableRepository):
+        async def apply_observation(self, payment_id, update):
+            operations = list(self._operations.get(payment_id, ()))
+            plan = await super().apply_observation(payment_id, update)
+            self._operations[payment_id] = operations
+            return plan
+
+    async def factory(facts):
+        return DroppedOperations([facts])
+
+    with pytest.raises(ConformanceError, match="observations_commit_operations"):
+        await run_conformance_suite(factory)
 
 
 async def test_reference_repository_passes_the_conformance_suite():
