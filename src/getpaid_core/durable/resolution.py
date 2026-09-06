@@ -209,8 +209,10 @@ def plan_resolution(
     if (
         operation.state in TERMINAL_OPERATION_STATES
         and facts.status == PaymentStatus.REFUND_STARTED
+        and not plan.related_operations
     ):
-        # A terminal intent no longer owns the pending-refund marker.
+        # Without a still-active cancellation target completed by this plan,
+        # a terminal intent no longer owns the pending-refund marker.
         # Reconfirming or correcting it cannot resolve unrelated external
         # work, which may have no local reservation in the retained history.
         plan = replace(

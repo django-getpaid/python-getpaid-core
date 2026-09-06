@@ -464,6 +464,75 @@ async def test_rejected_refund_resolution_preserves_external_progress_and_blocks
     assert retried == resolved
 
 
+@pytest.mark.parametrize(
+    "initial_state", [OperationState.UNKNOWN, OperationState.REJECTED]
+)
+@pytest.mark.parametrize(
+    "resolved_state", [OperationState.REJECTED, OperationState.SUCCEEDED]
+)
+async def test_cancellation_resolution_projects_its_still_pending_local_target(
+    initial_state, resolved_state
+):
+    repository = InMemoryDurableRepository(
+        [
+            PaymentFacts(
+                "pay",
+                Decimal("100"),
+                captured_funds=Decimal("50"),
+                remaining_authorization=Decimal("50"),
+                status=PaymentStatus.PARTIAL,
+            )
+        ]
+    )
+    await repository.reserve_operation(
+        "pay", OperationIntent("refund", OperationType.START_REFUND, Decimal("30"))
+    )
+    pending = await repository.record_operation_outcome(
+        "pay",
+        "refund",
+        OperationOutcome(OperationState.PROVIDER_PENDING, correlation="refund-1"),
+    )
+    await repository.reserve_operation(
+        "pay",
+        OperationIntent(
+            "cancel",
+            OperationType.CANCEL_REFUND,
+            parameters={"target_operation_id": "refund"},
+        ),
+    )
+    before = await repository.record_operation_outcome(
+        "pay", "cancel", OperationOutcome(initial_state)
+    )
+    resolution = decision(outcome=OperationOutcome(resolved_state))
+    resolved = await repository.resolve_operation(
+        "pay",
+        "cancel",
+        resolution,
+        expected_facts=before.facts,
+        expected_operation=before.operation,
+    )
+    assert resolved.operation.state is resolved_state
+    assert resolved.operation.resolutions == (resolution,)
+    assert resolved.facts.captured_funds == Decimal("50")
+    assert resolved.facts.remaining_authorization == Decimal("50")
+    assert resolved.facts.refunded_funds == Decimal("0")
+    target = await repository.get_operation("pay", "refund")
+    capture = OperationIntent("capture", OperationType.CHARGE, Decimal("10"))
+    if resolved_state is OperationState.SUCCEEDED:
+        assert target == replace(pending.operation, state=OperationState.REJECTED)
+        assert resolved.facts.status == PaymentStatus.PARTIAL
+        admitted = await repository.reserve_operation("pay", capture)
+        assert admitted.state is OperationState.RESERVED
+        assert admitted.resolved_amount == Decimal("10")
+    else:
+        assert target == pending.operation
+        assert resolved.facts.status == PaymentStatus.REFUND_STARTED
+        with pytest.raises(OperationConflictError):
+            await repository.reserve_operation("pay", capture)
+    assert await repository.get_payment_facts("pay") == resolved.facts
+    assert await repository.get_operation("pay", "cancel") == resolved.operation
+
+
 async def test_resolution_cannot_erase_confirmed_effects_or_reuse_audit_identity():
     repository, flow, intent, _ = await recovery_flow(
         OperationType.CHARGE, OperationOutcome(OperationState.SUCCEEDED)

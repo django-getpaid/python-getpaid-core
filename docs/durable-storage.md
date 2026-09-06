@@ -393,10 +393,13 @@ in `conflicting_outcomes`, alongside existing disputes and the new resolution au
 Ordinary provider outcomes still flag terminal discrepancies rather than correcting
 them automatically. Resolving a historical terminal intent preserves an existing
 refund-in-progress marker, whether reconfirming rejection, changing rejection to
-success, or correcting a successful amount. The decision does not resolve unrelated
-externally initiated work, even when that work has no local operation reservation.
-Clearing the reviewed payment's reconciliation flag does not clear that progress
-marker or make a new capture eligible while the external refund remains unresolved.
+success, or correcting a successful amount. The exception is a successful refund
+cancellation decision that completes its still-active, explicitly named local refund
+target: status then projects the remaining local work. A historical decision without
+such a target transition does not resolve unrelated externally initiated work, even
+when that work has no local operation reservation. Clearing the reviewed payment's
+reconciliation flag does not clear that progress marker or make a new capture
+eligible while the external refund remains unresolved.
 
 Neither an upward settlement correction nor changing a rejected operation to
 succeeded is allowed after any later intent was reserved: the old starting totals
