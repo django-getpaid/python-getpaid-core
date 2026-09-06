@@ -528,8 +528,9 @@ def plan_outcome(
     outcome -- including ``UNKNOWN`` -- moves no money and leaves the
     operation discoverable as unresolved work. Late nonterminal evidence
     cannot downgrade a terminal operation; contradictory terminal evidence
-    or correlation flags reconciliation without overwriting established
-    facts. Load the complete retained ``operations`` in the same boundary:
+    or correlation is retained in ``conflicting_outcomes`` and flags
+    reconciliation without overwriting established facts. Load the complete
+    retained ``operations`` in the same boundary:
     cancellation success requires its target and returns it through
     ``related_operations``; confirmed refunds establish a cumulative lower
     bound even when cancellation let their reservation baselines overlap.
@@ -603,10 +604,27 @@ def plan_outcome(
         or conflicting_external_id
         or contradictory_terminal
     )
+    conflicts = operation.conflicting_outcomes
+    if (
+        conflicting_correlation
+        or conflicting_external_id
+        or contradictory_terminal
+    ):
+        # Store only normalized fields, never arbitrary provider payloads or
+        # additional attributes on a plugin's outcome subclass.
+        evidence = OperationOutcome(
+            state=outcome.state,
+            settled_amount=outcome.settled_amount,
+            correlation=outcome.correlation,
+            reconciliation_required=outcome.reconciliation_required,
+            external_id=outcome.external_id,
+        )
+        conflicts = (*conflicts, evidence)
     recorded = replace(
         operation,
         correlation=operation.correlation or outcome.correlation,
         reconciliation_required=reconciliation,
+        conflicting_outcomes=conflicts,
     )
     facts = replace(
         facts,

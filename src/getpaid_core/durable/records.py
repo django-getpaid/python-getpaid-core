@@ -381,6 +381,9 @@ class OperationRecord:
     Submission time, scope and retry deadline are frozen by
     the first claim. ``settled_amount`` retains confirmed operation-specific
     money for detecting contradictory terminal evidence.
+    ``conflicting_outcomes`` retains normalized disputed evidence
+    independently of established facts;
+    persist it atomically with the record and reconciliation flags.
     """
 
     payment_id: str
@@ -403,6 +406,7 @@ class OperationRecord:
     settled_amount: Decimal | None = None
     correlation: str | None = None
     reconciliation_required: bool = False
+    conflicting_outcomes: tuple["OperationOutcome", ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(

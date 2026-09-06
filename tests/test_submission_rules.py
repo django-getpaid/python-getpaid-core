@@ -182,6 +182,41 @@ def test_late_evidence_preserves_terminal_money_and_flags_contradictions(
     assert late.operation.reconciliation_required is conflicting
 
 
+@pytest.mark.parametrize(
+    "disputed",
+    [
+        OperationOutcome(OperationState.SUCCEEDED, Decimal("30"), "capture-1"),
+        OperationOutcome(OperationState.SUCCEEDED, Decimal("40"), "capture-1"),
+        OperationOutcome(OperationState.SUCCEEDED, Decimal("20"), "capture-2"),
+        OperationOutcome(OperationState.SUCCEEDED, Decimal("20"), "capture-3"),
+        OperationOutcome(OperationState.REJECTED, correlation="capture-1"),
+    ],
+)
+def test_conflicting_outcome_retains_recoverable_evidence(disputed):
+    facts = authorized_facts()
+    operation = plan_reservation(
+        facts, (), charge_intent(amount=Decimal("40"))
+    ).operation
+    completed = plan_outcome(
+        facts,
+        operation,
+        OperationOutcome(OperationState.SUCCEEDED, Decimal("20"), "capture-1"),
+    )
+
+    conflict = plan_outcome(completed.facts, completed.operation, disputed)
+
+    assert conflict.operation.conflicting_outcomes == (disputed,)
+    assert conflict.operation == replace(
+        completed.operation,
+        reconciliation_required=True,
+        conflicting_outcomes=(disputed,),
+    )
+    assert conflict.facts == replace(
+        completed.facts, reconciliation_required=True
+    )
+    assert completed.operation.conflicting_outcomes == ()
+
+
 def test_conflicting_correlation_never_settles_another_provider_operation():
     facts = authorized_facts()
     operation = plan_reservation(
