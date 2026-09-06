@@ -9,6 +9,7 @@ compare-and-set that makes the commit atomic (ADR 0001, section 1).
 
 from collections.abc import Iterable
 from dataclasses import replace
+from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 from typing import Any
@@ -27,6 +28,7 @@ from getpaid_core.durable.records import OutcomePlan
 from getpaid_core.durable.records import PaymentFacts
 from getpaid_core.durable.records import ReplayRecord
 from getpaid_core.durable.records import ReservationPlan
+from getpaid_core.durable.records import SubmissionPlan
 from getpaid_core.durable.records import validate_event_identity
 from getpaid_core.durable.records import validate_provider_metadata
 from getpaid_core.enums import PaymentEvent
@@ -322,6 +324,74 @@ def plan_reservation(
             backend=facts.backend,
         ),
         created=True,
+    )
+
+
+def plan_submission(
+    facts: PaymentFacts,
+    operation: OperationRecord,
+    *,
+    expected_attempt: int,
+    now: datetime,
+    retry_until: datetime | None = None,
+    idempotency_scope: str | None = None,
+) -> SubmissionPlan:
+    """Compare-and-set the submission counter without provider I/O.
+
+    A retry caller MUST first reconcile and verify the provider's current
+    idempotency declaration covers the frozen key, scope and payload. This
+    local claim alone cannot establish that a provider retry is safe.
+    Never extend the first attempt's timestamp or retry window on replay.
+    """
+    if operation.payment_id != facts.payment_id:
+        raise OperationConflictError(
+            "Operation belongs to a different payment."
+        )
+    if facts.reconciliation_required or operation.reconciliation_required:
+        raise ReconciliationBlockedError(
+            f"Payment {facts.payment_id!r} requires reconciliation "
+            "before dispatch."
+        )
+    if type(expected_attempt) is not int or expected_attempt < 0:
+        raise InvalidTransitionError(
+            "Expected attempt must be a non-negative integer."
+        )
+    if not isinstance(now, datetime) or now.utcoffset() is None:
+        raise InvalidTransitionError("Submission time must be timezone-aware.")
+    if retry_until is not None and (
+        not isinstance(retry_until, datetime) or retry_until.utcoffset() is None
+    ):
+        raise InvalidTransitionError("Retry deadline must be timezone-aware.")
+    if operation.submission_attempts != expected_attempt:
+        return SubmissionPlan(operation, granted=False)
+    if operation.submission_attempts == 0:
+        if operation.state is not OperationState.RESERVED:
+            return SubmissionPlan(operation, granted=False)
+        return SubmissionPlan(
+            replace(
+                operation,
+                state=OperationState.SUBMITTING,
+                submitted_at=now,
+                submission_attempts=1,
+                retry_until=retry_until,
+                idempotency_scope=idempotency_scope,
+            ),
+            granted=True,
+        )
+    if (
+        operation.state
+        not in {OperationState.UNKNOWN, OperationState.SUBMITTING}
+        or operation.retry_until is None
+        or now >= operation.retry_until
+    ):
+        return SubmissionPlan(operation, granted=False)
+    return SubmissionPlan(
+        replace(
+            operation,
+            state=OperationState.SUBMITTING,
+            submission_attempts=operation.submission_attempts + 1,
+        ),
+        granted=True,
     )
 
 

@@ -464,6 +464,14 @@ class ReservationPlan:
 
 
 @dataclass(frozen=True, slots=True)
+class SubmissionPlan:
+    """A committed operation and whether this caller won submission rights."""
+
+    operation: OperationRecord
+    granted: bool
+
+
+@dataclass(frozen=True, slots=True)
 class OutcomePlan:
     """What an adapter must commit when an operation resolves.
 

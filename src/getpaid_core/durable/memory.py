@@ -14,6 +14,7 @@ lock or a compare-and-set retry against its own database.
 import asyncio
 from collections.abc import Iterable
 from collections.abc import Sequence
+from datetime import datetime
 
 from getpaid_core.durable.records import ObservationPlan
 from getpaid_core.durable.records import OperationIntent
@@ -22,9 +23,11 @@ from getpaid_core.durable.records import OperationRecord
 from getpaid_core.durable.records import OutcomePlan
 from getpaid_core.durable.records import PaymentFacts
 from getpaid_core.durable.records import ReplayRecord
+from getpaid_core.durable.records import SubmissionPlan
 from getpaid_core.durable.rules import plan_observation
 from getpaid_core.durable.rules import plan_outcome
 from getpaid_core.durable.rules import plan_reservation
+from getpaid_core.durable.rules import plan_submission
 from getpaid_core.exceptions import OperationConflictError
 from getpaid_core.types import PaymentUpdate
 
@@ -65,36 +68,57 @@ class InMemoryDurableRepository:
     ) -> OperationRecord:
         async with self._lock_for(payment_id):
             operations = self._operations.setdefault(payment_id, [])
-            plan = plan_reservation(
-                self._facts[payment_id], operations, intent
-            )
+            plan = plan_reservation(self._facts[payment_id], operations, intent)
             if plan.created:
                 operations.append(plan.operation)
             return plan.operation
+
+    async def claim_submission(
+        self,
+        payment_id: str,
+        operation_id: str,
+        *,
+        expected_attempt: int,
+        now: datetime,
+        retry_until: datetime | None = None,
+        idempotency_scope: str | None = None,
+    ) -> SubmissionPlan:
+        """Claim locally; the caller reconciles before asking for a retry."""
+        async with self._lock_for(payment_id):
+            operations = self._operations.get(payment_id, [])
+            index = self._operation_index(payment_id, operation_id, operations)
+            plan = plan_submission(
+                self._facts[payment_id],
+                operations[index],
+                expected_attempt=expected_attempt,
+                now=now,
+                retry_until=retry_until,
+                idempotency_scope=idempotency_scope,
+            )
+            operations[index] = plan.operation
+            return plan
+
+    @staticmethod
+    def _operation_index(
+        payment_id: str,
+        operation_id: str,
+        operations: Sequence[OperationRecord],
+    ) -> int:
+        for index, operation in enumerate(operations):
+            if operation.operation_id == operation_id:
+                return index
+        raise OperationConflictError(
+            f"Operation {operation_id!r} was never reserved on "
+            f"payment {payment_id!r}.",
+            context={"payment_id": payment_id, "operation_id": operation_id},
+        )
 
     async def record_operation_outcome(
         self, payment_id: str, operation_id: str, outcome: OperationOutcome
     ) -> OutcomePlan:
         async with self._lock_for(payment_id):
             operations = self._operations.setdefault(payment_id, [])
-            index = next(
-                (
-                    position
-                    for position, record in enumerate(operations)
-                    if record.operation_id == operation_id
-                ),
-                None,
-            )
-            if index is None:
-                raise OperationConflictError(
-                    f"Operation {operation_id!r} was never reserved on "
-                    f"payment {payment_id!r}; an outcome cannot be recorded "
-                    "for it.",
-                    context={
-                        "payment_id": payment_id,
-                        "operation_id": operation_id,
-                    },
-                )
+            index = self._operation_index(payment_id, operation_id, operations)
             plan = plan_outcome(
                 self._facts[payment_id], operations[index], outcome
             )

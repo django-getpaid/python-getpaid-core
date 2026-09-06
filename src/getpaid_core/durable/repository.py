@@ -17,6 +17,7 @@ normalized result afterwards.
 from collections.abc import Awaitable
 from collections.abc import Callable
 from collections.abc import Sequence
+from datetime import datetime
 from typing import Protocol
 from typing import cast
 from typing import runtime_checkable
@@ -27,6 +28,7 @@ from getpaid_core.durable.records import OperationOutcome
 from getpaid_core.durable.records import OperationRecord
 from getpaid_core.durable.records import OutcomePlan
 from getpaid_core.durable.records import PaymentFacts
+from getpaid_core.durable.records import SubmissionPlan
 from getpaid_core.exceptions import StateConflictError
 from getpaid_core.exceptions import UnsupportedRepositoryError
 from getpaid_core.types import PaymentUpdate
@@ -52,6 +54,26 @@ class DurablePaymentRepository(Protocol):
         ID with the same parameters returns the existing reservation
         rather than creating a second one; a conflicting intent raises
         ``OperationConflictError``.
+        """
+        ...
+
+    async def claim_submission(
+        self,
+        payment_id: str,
+        operation_id: str,
+        *,
+        expected_attempt: int,
+        now: datetime,
+        retry_until: datetime | None = None,
+        idempotency_scope: str | None = None,
+    ) -> SubmissionPlan:
+        """Atomically claim a submission via core's ``plan_submission``.
+
+        Reload current facts and operation and commit the counter/state
+        together. The first claim freezes time, retry window and scope.
+        Before requesting a retry, callers must reconcile and verify the
+        provider's idempotency guarantee still covers this intent. A claim
+        is not evidence of provider acceptance. No lock spans provider I/O.
         """
         ...
 
@@ -108,6 +130,7 @@ class DurablePaymentRepository(Protocol):
 MANDATORY_OPERATIONS: tuple[str, ...] = (
     "get_payment_facts",
     "reserve_operation",
+    "claim_submission",
     "apply_observation",
     "record_operation_outcome",
     "get_operation",
