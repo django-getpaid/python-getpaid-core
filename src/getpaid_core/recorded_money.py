@@ -64,6 +64,17 @@ class RecordedMoneyKind(StrEnum):
 
     RECEIPT = "receipt"
     REPAYMENT = "repayment"
+    CORRECTION = "correction"
+
+
+class RecordingCorrectionReason(StrEnum):
+    """Why a previously asserted movement must no longer be effective."""
+
+    MISTAKEN_ENTRY = "mistaken_entry"
+    INCORRECT_AMOUNT = "incorrect_amount"
+    INCORRECT_TIMESTAMP = "incorrect_timestamp"
+    INCORRECT_REFERENCE = "incorrect_reference"
+    DUPLICATE_ENTRY = "duplicate_entry"
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -73,10 +84,12 @@ class RecordedMoneyCommand:
     command_id: str
     kind: RecordedMoneyKind
     actor: str
-    amount: Decimal
-    occurred_at: datetime
+    amount: Decimal | None = None
+    occurred_at: datetime | None = None
     note: str | None = None
     evidence_reference: str | None = None
+    target_command_id: str | None = None
+    correction_reason: RecordingCorrectionReason | None = None
 
     def __post_init__(self) -> None:
         _text(self.command_id, "command identity")
@@ -96,8 +109,43 @@ class RecordedMoneyCommand:
             raise InvalidTransitionError(
                 "Repayment requires external evidence."
             )
-        _amount(self.amount, positive=True)
-        object.__setattr__(self, "occurred_at", _aware(self.occurred_at))
+        if self.kind is RecordedMoneyKind.CORRECTION:
+            if not isinstance(self.target_command_id, str):
+                raise InvalidTransitionError(
+                    "Correction requires a target identity."
+                )
+            _text(self.target_command_id, "correction target")
+            if not isinstance(
+                self.correction_reason, RecordingCorrectionReason
+            ):
+                raise InvalidTransitionError(
+                    "Correction requires a typed reason."
+                )
+            if any(
+                value is not None
+                for value in (
+                    self.amount,
+                    self.occurred_at,
+                    self.evidence_reference,
+                )
+            ):
+                raise InvalidTransitionError(
+                    "Correction derives money, time and evidence."
+                )
+        else:
+            if (
+                self.target_command_id is not None
+                or self.correction_reason is not None
+            ):
+                raise InvalidTransitionError(
+                    "Only corrections can name a target or reason."
+                )
+            if self.amount is None or self.occurred_at is None:
+                raise InvalidTransitionError(
+                    "Movements require amount and business time."
+                )
+            _amount(self.amount, positive=True)
+            object.__setattr__(self, "occurred_at", _aware(self.occurred_at))
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -138,7 +186,8 @@ def project_recorded_money(
 ) -> RecordedMoneyProjection:
     """Project receipt evidence without changing the original records."""
     records = tuple(history)
-    seen: set[str] = set()
+    seen: dict[str, RecordedMoneyEntry] = {}
+    corrected: set[str] = set()
     for entry in records:
         if not isinstance(entry, RecordedMoneyEntry):
             raise InvalidTransitionError("Invalid retained record type.")
@@ -148,25 +197,35 @@ def project_recorded_money(
             raise InvalidTransitionError("Invalid retained command type.")
         if command.command_id in seen:
             raise InvalidTransitionError("Duplicate retained command identity.")
-        seen.add(command.command_id)
         if entry.payment_id != records[0].payment_id:
             raise InvalidTransitionError("History belongs to another payment.")
+        _aware(entry.effective_at)
+        expected = _make_entry(
+            entry.payment_id,
+            command,
+            _aware(entry.recorded_at),
+            seen,
+            corrected,
+        )
         if (
-            _aware(entry.effective_at) != command.occurred_at
-            or entry.effective_at > _aware(entry.recorded_at)
-            or entry.evidence_reference != command.evidence_reference
-            or not isinstance(entry.signed_amount, Decimal)
+            not isinstance(entry.signed_amount, Decimal)
             or not entry.signed_amount.is_finite()
-            or entry.signed_amount != _signed_amount(command)
+            or entry != expected
         ):
             raise InvalidTransitionError(
                 "Retained evidence disagrees with command."
             )
+        seen[command.command_id] = entry
+        if command.target_command_id is not None:
+            corrected.add(command.target_command_id)
+    effective = tuple(
+        r for r in records if r.command.command_id not in corrected
+    )
     receipts = tuple(
-        r for r in records if r.command.kind is RecordedMoneyKind.RECEIPT
+        r for r in effective if r.command.kind is RecordedMoneyKind.RECEIPT
     )
     repayments = tuple(
-        r for r in records if r.command.kind is RecordedMoneyKind.REPAYMENT
+        r for r in effective if r.command.kind is RecordedMoneyKind.REPAYMENT
     )
     captured = sum((r.signed_amount for r in receipts), Decimal("0"))
     refunded = sum(
@@ -179,10 +238,51 @@ def project_recorded_money(
     )
 
 
-def _signed_amount(command: RecordedMoneyCommand) -> Decimal:
+def _make_entry(
+    payment_id: str,
+    command: RecordedMoneyCommand,
+    now: datetime,
+    retained: dict[str, RecordedMoneyEntry],
+    corrected: set[str],
+) -> RecordedMoneyEntry:
+    if command.kind is RecordedMoneyKind.CORRECTION:
+        target = retained.get(command.target_command_id or "")
+        if (
+            target is None
+            or target.command.kind is RecordedMoneyKind.CORRECTION
+        ):
+            raise InvalidTransitionError(
+                "Correction must target an original movement."
+            )
+        if target.command.command_id in corrected:
+            raise InvalidTransitionError("Movement has already been corrected.")
+        if target.recorded_at > now:
+            raise InvalidTransitionError(
+                "Correction cannot predate its recorded target."
+            )
+        return RecordedMoneyEntry(
+            payment_id,
+            command,
+            now,
+            target.signed_amount.copy_negate(),
+            target.effective_at,
+            target.evidence_reference,
+        )
+    # The command constructor validates the kind-specific required fields.
+    assert command.amount is not None and command.occurred_at is not None
+    if command.occurred_at > now:
+        raise InvalidTransitionError("Business time cannot be in the future.")
+    signed = command.amount
     if command.kind is RecordedMoneyKind.REPAYMENT:
-        return command.amount.copy_negate()
-    return command.amount
+        signed = signed.copy_negate()
+    return RecordedMoneyEntry(
+        payment_id,
+        command,
+        now,
+        signed,
+        command.occurred_at,
+        command.evidence_reference,
+    )
 
 
 def plan_recorded_money(
@@ -245,7 +345,7 @@ def plan_recorded_money(
         )
     if not isinstance(command, RecordedMoneyCommand):
         raise InvalidTransitionError("A recorded-money command is required.")
-    if command.occurred_at > now:
+    if command.occurred_at is not None and command.occurred_at > now:
         raise InvalidTransitionError("Business time cannot be in the future.")
     for retained in current.records:
         if retained.command.command_id == command.command_id:
@@ -254,13 +354,16 @@ def plan_recorded_money(
                     "Recorded command identity conflicts."
                 )
             return RecordedMoneyPlan(facts, retained, current, applied=False)
-    entry = RecordedMoneyEntry(
-        payment_id=facts.payment_id,
-        command=command,
-        recorded_at=now,
-        signed_amount=_signed_amount(command),
-        effective_at=command.occurred_at,
-        evidence_reference=command.evidence_reference,
+    entry = _make_entry(
+        facts.payment_id,
+        command,
+        now,
+        {entry.command.command_id: entry for entry in current.records},
+        {
+            entry.command.target_command_id
+            for entry in current.records
+            if entry.command.target_command_id is not None
+        },
     )
     projection = project_recorded_money((*current.records, entry))
     if projection.captured_funds > facts.amount_required:

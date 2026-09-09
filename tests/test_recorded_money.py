@@ -17,6 +17,7 @@ from getpaid_core.exceptions import OperationConflictError
 from getpaid_core.recorded_money import RECORDED_MONEY_BACKEND
 from getpaid_core.recorded_money import RecordedMoneyCommand
 from getpaid_core.recorded_money import RecordedMoneyKind
+from getpaid_core.recorded_money import RecordingCorrectionReason
 from getpaid_core.recorded_money import plan_recorded_money
 from getpaid_core.recorded_money import project_recorded_money
 
@@ -110,6 +111,56 @@ def test_repayment_requires_evidence_and_cannot_exceed_unreturned_receipts():
         )
     assert partial.facts.refunded_funds == Decimal("10")
     assert len(partial.projection.records) == 2
+
+
+def correction(command_id="correction-1", target="receipt-1", **overrides):
+    return RecordedMoneyCommand(
+        **{
+            "command_id": command_id,
+            "kind": RecordedMoneyKind.CORRECTION,
+            "actor": "reviewer-reference",
+            "target_command_id": target,
+            "correction_reason": RecordingCorrectionReason.MISTAKEN_ENTRY,
+            **overrides,
+        }
+    )
+
+
+def test_receipt_correction_is_an_inverse_not_a_refund_or_deletion():
+    received = plan_recorded_money(
+        root(),
+        (),
+        receipt(amount="100", evidence_reference="bank-reference"),
+        now=NOW,
+    )
+    corrected = plan_recorded_money(
+        received.facts,
+        received.projection.records,
+        correction(),
+        now=NOW + timedelta(days=1),
+    )
+    assert corrected.facts.captured_funds == Decimal("0")
+    assert corrected.facts.refunded_funds == Decimal("0")
+    assert corrected.facts.status == PaymentStatus.PREPARED
+    assert corrected.entry.signed_amount == Decimal("-100")
+    assert corrected.entry.effective_at == BUSINESS_TIME
+    assert corrected.entry.evidence_reference == "bank-reference"
+    assert corrected.entry.recorded_at == NOW + timedelta(days=1)
+    assert corrected.projection.records == (received.entry, corrected.entry)
+    assert corrected.projection.records[0] is received.entry
+    assert corrected.projection.effective_receipts == ()
+    assert corrected.projection.effective_repayments == ()
+    assert received.facts.captured_funds == Decimal("100")
+    replacement = plan_recorded_money(
+        corrected.facts,
+        corrected.projection.records,
+        receipt("truthful", "40"),
+        now=NOW + timedelta(days=2),
+    )
+    assert replacement.facts.captured_funds == Decimal("40")
+    assert replacement.facts.status == PaymentStatus.PARTIAL
+    assert replacement.projection.effective_receipts == (replacement.entry,)
+    assert replacement.projection.records[:2] == corrected.projection.records
 
 
 def test_partial_receipt_projects_literal_totals_and_retains_evidence():
