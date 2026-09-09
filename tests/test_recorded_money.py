@@ -198,6 +198,20 @@ def test_money_is_exact_independently_of_the_callers_decimal_context():
         assert corrected.entry.signed_amount == Decimal("0.001")
 
 
+def test_history_with_unfunded_repayment_prefix_is_not_adopted():
+    received = plan_recorded_money(root(), (), receipt(), now=NOW)
+    repaid = plan_recorded_money(
+        received.facts, received.projection.records, repayment(), now=NOW
+    )
+    reversed_history = (repaid.entry, received.entry)
+    with pytest.raises(InvalidTransitionError):
+        project_recorded_money(reversed_history)
+    with pytest.raises(InvalidTransitionError):
+        plan_recorded_money(
+            repaid.facts, reversed_history, receipt("another"), now=NOW
+        )
+
+
 def test_partial_receipt_projects_literal_totals_and_retains_evidence():
     initial = root()
     command = receipt()

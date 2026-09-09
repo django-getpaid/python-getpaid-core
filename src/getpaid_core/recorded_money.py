@@ -207,6 +207,7 @@ def project_recorded_money(
     records = tuple(history)
     seen: dict[str, RecordedMoneyEntry] = {}
     corrected: set[str] = set()
+    captured = refunded = Decimal("0")
     for entry in records:
         if not isinstance(entry, RecordedMoneyEntry):
             raise InvalidTransitionError("Invalid retained record type.")
@@ -234,6 +235,15 @@ def project_recorded_money(
             raise InvalidTransitionError(
                 "Retained evidence disagrees with command."
             )
+        original = seen.get(command.target_command_id or "", entry)
+        if original.command.kind is RecordedMoneyKind.RECEIPT:
+            captured = _sum_exact((captured, entry.signed_amount))
+        else:
+            refunded = _sum_exact((refunded, entry.signed_amount.copy_negate()))
+        if not 0 <= refunded <= captured:
+            raise InvalidTransitionError(
+                "Retained history contains unfunded money."
+            )
         seen[command.command_id] = entry
         if command.target_command_id is not None:
             corrected.add(command.target_command_id)
@@ -246,10 +256,6 @@ def project_recorded_money(
     repayments = tuple(
         r for r in effective if r.command.kind is RecordedMoneyKind.REPAYMENT
     )
-    captured = _sum_exact(r.signed_amount for r in receipts)
-    refunded = _sum_exact(r.signed_amount.copy_negate() for r in repayments)
-    if refunded > captured:
-        raise InvalidTransitionError("Repayments exceed effective receipts.")
     return RecordedMoneyProjection(
         records, receipts, repayments, captured, refunded
     )
