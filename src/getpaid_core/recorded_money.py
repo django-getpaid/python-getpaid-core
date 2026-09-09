@@ -202,8 +202,12 @@ def _sum_exact(values: Iterable[Decimal]) -> Decimal:
 
 def project_recorded_money(
     history: Iterable[RecordedMoneyEntry],
+    *,
+    amount_required: Decimal | None = None,
 ) -> RecordedMoneyProjection:
     """Project receipt evidence without changing the original records."""
+    if amount_required is not None:
+        _amount(amount_required, positive=True)
     records = tuple(history)
     seen: dict[str, RecordedMoneyEntry] = {}
     corrected: set[str] = set()
@@ -243,6 +247,10 @@ def project_recorded_money(
         if not 0 <= refunded <= captured:
             raise InvalidTransitionError(
                 "Retained history contains unfunded money."
+            )
+        if amount_required is not None and captured > amount_required:
+            raise InvalidTransitionError(
+                "Recorded receipts exceed the required amount."
             )
         seen[command.command_id] = entry
         if command.target_command_id is not None:
@@ -342,7 +350,9 @@ def plan_recorded_money(
         raise InvalidTransitionError(
             "An uncontaminated recorded-money root is required."
         )
-    current = project_recorded_money(history)
+    current = project_recorded_money(
+        history, amount_required=facts.amount_required
+    )
     if (
         current.captured_funds != facts.captured_funds
         or current.refunded_funds != facts.refunded_funds
@@ -388,11 +398,9 @@ def plan_recorded_money(
             if entry.command.target_command_id is not None
         },
     )
-    projection = project_recorded_money((*current.records, entry))
-    if projection.captured_funds > facts.amount_required:
-        raise InvalidTransitionError(
-            "Recorded receipts exceed the required amount."
-        )
+    projection = project_recorded_money(
+        (*current.records, entry), amount_required=facts.amount_required
+    )
     updated = replace(
         facts,
         captured_funds=projection.captured_funds,

@@ -12,6 +12,9 @@ from decimal import localcontext
 import pytest
 
 from getpaid_core.durable import PaymentFacts
+from getpaid_core.durable import plan_observation
+from getpaid_core.durable.records import ObservationConflict
+from getpaid_core.enums import PaymentEvent
 from getpaid_core.enums import PaymentStatus
 from getpaid_core.exceptions import InvalidTransitionError
 from getpaid_core.exceptions import OperationConflictError
@@ -21,6 +24,7 @@ from getpaid_core.recorded_money import RecordedMoneyKind
 from getpaid_core.recorded_money import RecordingCorrectionReason
 from getpaid_core.recorded_money import plan_recorded_money
 from getpaid_core.recorded_money import project_recorded_money
+from getpaid_core.types import PaymentUpdate
 
 
 NOW = datetime(2026, 9, 9, 12, tzinfo=UTC)
@@ -209,6 +213,256 @@ def test_history_with_unfunded_repayment_prefix_is_not_adopted():
     with pytest.raises(InvalidTransitionError):
         plan_recorded_money(
             repaid.facts, reversed_history, receipt("another"), now=NOW
+        )
+
+
+def test_repayment_correction_preserves_false_record_and_allows_truthful_replacement():
+    received = plan_recorded_money(root(), (), receipt(amount="100"), now=NOW)
+    repaid = plan_recorded_money(
+        received.facts,
+        received.projection.records,
+        repayment(amount="100"),
+        now=NOW,
+    )
+    fixed = plan_recorded_money(
+        repaid.facts,
+        repaid.projection.records,
+        correction(target="repayment-1"),
+        now=NOW + timedelta(days=1),
+    )
+    assert fixed.facts.captured_funds == Decimal("100")
+    assert fixed.facts.refunded_funds == Decimal("0")
+    assert fixed.facts.status == PaymentStatus.PAID
+    assert fixed.entry.signed_amount == Decimal("100")
+    assert fixed.entry.effective_at == BUSINESS_TIME
+    assert fixed.entry.evidence_reference == "transfer-reference"
+    assert fixed.projection.records[:2] == repaid.projection.records
+    assert fixed.projection.effective_repayments == ()
+    replacement = plan_recorded_money(
+        fixed.facts,
+        fixed.projection.records,
+        repayment("truthful-repayment", "40"),
+        now=NOW + timedelta(days=2),
+    )
+    assert replacement.facts.refunded_funds == Decimal("40")
+    assert replacement.facts.status == PaymentStatus.PARTIALLY_REFUNDED
+    assert replacement.projection.effective_repayments == (replacement.entry,)
+
+
+def test_correction_cannot_unfund_an_actual_repayment():
+    received = plan_recorded_money(root(), (), receipt(), now=NOW)
+    repaid = plan_recorded_money(
+        received.facts, received.projection.records, repayment(), now=NOW
+    )
+    before = repaid.projection.records
+    with pytest.raises(InvalidTransitionError):
+        plan_recorded_money(repaid.facts, before, correction(), now=NOW)
+    assert repaid.projection.records is before
+    assert repaid.facts.captured_funds == Decimal("30")
+    assert repaid.facts.refunded_funds == Decimal("10")
+    assert repaid.projection.effective_repayments == (repaid.entry,)
+
+
+def test_partial_receipt_can_be_corrected_while_other_receipts_fund_repayment():
+    first = plan_recorded_money(root(), (), receipt(), now=NOW)
+    second = plan_recorded_money(
+        first.facts,
+        first.projection.records,
+        receipt("receipt-2", "70"),
+        now=NOW,
+    )
+    repaid = plan_recorded_money(
+        second.facts, second.projection.records, repayment(amount="50"), now=NOW
+    )
+    fixed = plan_recorded_money(
+        repaid.facts, repaid.projection.records, correction(), now=NOW
+    )
+    assert fixed.facts.captured_funds == Decimal("70")
+    assert fixed.facts.refunded_funds == Decimal("50")
+    assert fixed.facts.status == PaymentStatus.PARTIALLY_REFUNDED
+    assert fixed.projection.effective_receipts == (second.entry,)
+    assert fixed.projection.effective_repayments == (repaid.entry,)
+
+
+def test_correction_replay_and_original_replay_do_not_reapply_or_resurrect():
+    received = plan_recorded_money(root(), (), receipt(), now=NOW)
+    fixed = plan_recorded_money(
+        received.facts, received.projection.records, correction(), now=NOW
+    )
+    for command, original in [
+        (correction(), fixed.entry),
+        (receipt(), received.entry),
+    ]:
+        retry = plan_recorded_money(
+            fixed.facts,
+            fixed.projection.records,
+            command,
+            now=NOW + timedelta(days=1),
+        )
+        assert retry.applied is False
+        assert retry.entry is original
+        assert retry.facts is fixed.facts
+        assert retry.projection.effective_receipts == ()
+    for command in [
+        correction("other"),
+        correction("chain", "correction-1"),
+        correction("missing", "absent"),
+    ]:
+        with pytest.raises(InvalidTransitionError):
+            plan_recorded_money(
+                fixed.facts, fixed.projection.records, command, now=NOW
+            )
+    with pytest.raises(OperationConflictError):
+        plan_recorded_money(
+            fixed.facts,
+            fixed.projection.records,
+            correction(
+                correction_reason=RecordingCorrectionReason.INCORRECT_AMOUNT
+            ),
+            now=NOW,
+        )
+    with pytest.raises(OperationConflictError):
+        plan_recorded_money(
+            fixed.facts,
+            fixed.projection.records,
+            correction(target="other"),
+            now=NOW,
+        )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"actor": None},
+        {"actor": ""},
+        {"target_command_id": None},
+        {"target_command_id": ""},
+        {"target_command_id": []},
+        {"correction_reason": None},
+        {"correction_reason": "mistaken_entry"},
+        {"correction_reason": {}},
+        {"amount": Decimal("1")},
+        {"occurred_at": BUSINESS_TIME},
+        {"evidence_reference": "override"},
+    ],
+)
+def test_malformed_corrections_are_refused(change):
+    with pytest.raises(InvalidTransitionError):
+        correction(**change)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"target_command_id": "receipt-1"},
+        {"correction_reason": RecordingCorrectionReason.MISTAKEN_ENTRY},
+        {"amount": None},
+        {"occurred_at": None},
+    ],
+)
+def test_movements_cannot_smuggle_correction_semantics(change):
+    with pytest.raises(InvalidTransitionError):
+        replace(receipt(), **change)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"recorded_at": NOW.replace(tzinfo=None)},
+        {"effective_at": BUSINESS_TIME.replace(tzinfo=None)},
+        {"recorded_at": BUSINESS_TIME - timedelta(seconds=1)},
+        {"recorded_at": NOW + timedelta(days=1)},
+        {"effective_at": BUSINESS_TIME - timedelta(seconds=1)},
+        {"evidence_reference": "different"},
+        {"signed_amount": Decimal("NaN")},
+        {"signed_amount": Decimal("Infinity")},
+        {"signed_amount": 30},
+        {"payment_id": ""},
+        {"command": "not-command"},
+    ],
+)
+def test_malformed_retained_evidence_is_refused(change):
+    first = plan_recorded_money(root(), (), receipt(), now=NOW)
+    with pytest.raises(InvalidTransitionError):
+        plan_recorded_money(
+            first.facts,
+            (replace(first.entry, **change),),
+            receipt("next"),
+            now=NOW,
+        )
+
+
+def test_reconciliation_evidence_is_neither_cleared_nor_overwritten_even_on_retry():
+    first = plan_recorded_money(root(), (), receipt(), now=NOW)
+    disputed = replace(
+        first.facts,
+        observation_conflicts=(ObservationConflict(None, "{}", "disputed"),),
+    )
+    for command in (receipt(), receipt("another")):
+        with pytest.raises(InvalidTransitionError):
+            plan_recorded_money(
+                disputed, first.projection.records, command, now=NOW
+            )
+    assert disputed.observation_conflicts == (
+        ObservationConflict(None, "{}", "disputed"),
+    )
+    assert disputed.captured_funds == Decimal("30")
+
+
+def test_ordinary_provider_observations_remain_monotone_not_corrections():
+    captured = plan_observation(
+        root(backend="provider"),
+        (),
+        PaymentUpdate(
+            payment_event=PaymentEvent.PAYMENT_CAPTURED,
+            paid_amount=Decimal("100"),
+        ),
+    )
+    repaid = plan_observation(
+        captured.facts,
+        (),
+        PaymentUpdate(
+            payment_event=PaymentEvent.REFUND_CONFIRMED,
+            refunded_amount=Decimal("40"),
+        ),
+    )
+    stale = plan_observation(
+        repaid.facts,
+        (),
+        PaymentUpdate(paid_amount=Decimal("0"), refunded_amount=Decimal("0")),
+    )
+    assert stale.facts.captured_funds == Decimal("100")
+    assert stale.facts.refunded_funds == Decimal("40")
+    assert stale.facts.status == PaymentStatus.PARTIALLY_REFUNDED
+    with pytest.raises(InvalidTransitionError):
+        plan_recorded_money(stale.facts, (), correction(), now=NOW)
+    invalid = plan_observation(
+        repaid.facts,
+        (),
+        PaymentUpdate(
+            payment_event=PaymentEvent.PAYMENT_CAPTURED,
+            paid_amount=Decimal("-100"),
+        ),
+    )
+    assert invalid.facts.captured_funds == Decimal("100")
+    assert invalid.facts.refunded_funds == Decimal("40")
+    assert invalid.facts.reconciliation_required is True
+    assert invalid.facts.observation_conflicts
+
+
+def test_a_corrected_history_cannot_hide_exceeding_required_amount():
+    received = plan_recorded_money(
+        root(amount_required=Decimal("200")), (), receipt(amount="150"), now=NOW
+    )
+    fixed = plan_recorded_money(
+        received.facts, received.projection.records, correction(), now=NOW
+    )
+    with pytest.raises(InvalidTransitionError):
+        plan_recorded_money(
+            replace(fixed.facts, amount_required=Decimal("100")),
+            fixed.projection.records,
+            receipt("new"),
+            now=NOW,
         )
 
 
