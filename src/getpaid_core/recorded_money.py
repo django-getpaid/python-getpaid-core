@@ -10,7 +10,10 @@ from dataclasses import dataclass
 from dataclasses import replace
 from datetime import UTC
 from datetime import datetime
+from decimal import MAX_EMAX
+from decimal import MIN_EMIN
 from decimal import Decimal
+from decimal import localcontext
 from enum import StrEnum
 from typing import TYPE_CHECKING
 from typing import Final
@@ -181,6 +184,22 @@ class RecordedMoneyPlan:
     applied: bool
 
 
+def _sum_exact(values: Iterable[Decimal]) -> Decimal:
+    """Add finite amounts without ambient precision/exponent rounding."""
+    amounts = tuple(values)
+    if not amounts:
+        return Decimal("0")
+    least_exponent = min(cast("int", a.as_tuple().exponent) for a in amounts)
+    greatest_digit = max(a.adjusted() for a in amounts)
+    with localcontext() as context:
+        context.prec = max(
+            1, greatest_digit - least_exponent + len(str(len(amounts))) + 2
+        )
+        context.Emax = MAX_EMAX
+        context.Emin = MIN_EMIN
+        return sum(amounts, Decimal("0"))
+
+
 def project_recorded_money(
     history: Iterable[RecordedMoneyEntry],
 ) -> RecordedMoneyProjection:
@@ -227,10 +246,8 @@ def project_recorded_money(
     repayments = tuple(
         r for r in effective if r.command.kind is RecordedMoneyKind.REPAYMENT
     )
-    captured = sum((r.signed_amount for r in receipts), Decimal("0"))
-    refunded = sum(
-        (r.signed_amount.copy_negate() for r in repayments), Decimal("0")
-    )
+    captured = _sum_exact(r.signed_amount for r in receipts)
+    refunded = _sum_exact(r.signed_amount.copy_negate() for r in repayments)
     if refunded > captured:
         raise InvalidTransitionError("Repayments exceed effective receipts.")
     return RecordedMoneyProjection(

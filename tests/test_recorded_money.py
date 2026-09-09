@@ -7,6 +7,7 @@ from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 from decimal import Decimal
+from decimal import localcontext
 
 import pytest
 
@@ -161,6 +162,40 @@ def test_receipt_correction_is_an_inverse_not_a_refund_or_deletion():
     assert replacement.facts.status == PaymentStatus.PARTIAL
     assert replacement.projection.effective_receipts == (replacement.entry,)
     assert replacement.projection.records[:2] == corrected.projection.records
+
+
+def test_money_is_exact_independently_of_the_callers_decimal_context():
+    required = Decimal("10000000000000000000000000000.003")
+    with localcontext() as context:
+        context.prec = 4
+        received = plan_recorded_money(
+            root(amount_required=required),
+            (),
+            receipt(amount="10000000000000000000000000000.001"),
+            now=NOW,
+        )
+        full = plan_recorded_money(
+            received.facts,
+            received.projection.records,
+            receipt("rest", "0.002"),
+            now=NOW,
+        )
+        assert full.facts.captured_funds == required
+        repaid = plan_recorded_money(
+            full.facts,
+            full.projection.records,
+            repayment(amount="0.001"),
+            now=NOW,
+        )
+        corrected = plan_recorded_money(
+            repaid.facts,
+            repaid.projection.records,
+            correction(target="repayment-1"),
+            now=NOW,
+        )
+        assert corrected.facts.captured_funds == required
+        assert corrected.facts.refunded_funds == Decimal("0")
+        assert corrected.entry.signed_amount == Decimal("0.001")
 
 
 def test_partial_receipt_projects_literal_totals_and_retains_evidence():
