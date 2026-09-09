@@ -49,6 +49,69 @@ def receipt(command_id="receipt-1", amount="30", **overrides):
     )
 
 
+def repayment(command_id="repayment-1", amount="10", **overrides):
+    return receipt(
+        command_id,
+        amount,
+        **{
+            "kind": RecordedMoneyKind.REPAYMENT,
+            "evidence_reference": "transfer-reference",
+            **overrides,
+        },
+    )
+
+
+def test_actual_partial_and_full_repayments_preserve_gross_receipts():
+    received = plan_recorded_money(root(), (), receipt(amount="100"), now=NOW)
+    partial = plan_recorded_money(
+        received.facts, received.projection.records, repayment(), now=NOW
+    )
+    assert partial.facts.status == PaymentStatus.PARTIALLY_REFUNDED
+    assert partial.facts.captured_funds == Decimal("100")
+    assert partial.facts.refunded_funds == Decimal("10")
+    assert partial.entry.signed_amount == Decimal("-10")
+    assert partial.entry.evidence_reference == "transfer-reference"
+    full = plan_recorded_money(
+        partial.facts,
+        partial.projection.records,
+        repayment("repayment-2", "90"),
+        now=NOW,
+    )
+    assert full.facts.status == PaymentStatus.REFUNDED
+    assert full.facts.captured_funds == Decimal("100")
+    assert full.facts.refunded_funds == Decimal("100")
+    assert full.projection.effective_receipts == (received.entry,)
+    assert full.projection.effective_repayments == (partial.entry, full.entry)
+    retry = plan_recorded_money(
+        full.facts,
+        full.projection.records,
+        full.entry.command,
+        now=NOW + timedelta(days=1),
+    )
+    assert retry.applied is False
+    assert retry.entry is full.entry
+
+
+def test_repayment_requires_evidence_and_cannot_exceed_unreturned_receipts():
+    with pytest.raises(InvalidTransitionError):
+        repayment(evidence_reference=None)
+    with pytest.raises(InvalidTransitionError):
+        plan_recorded_money(root(), (), repayment(), now=NOW)
+    received = plan_recorded_money(root(), (), receipt(), now=NOW)
+    partial = plan_recorded_money(
+        received.facts, received.projection.records, repayment(), now=NOW
+    )
+    with pytest.raises(InvalidTransitionError):
+        plan_recorded_money(
+            partial.facts,
+            partial.projection.records,
+            repayment("too-much", "21"),
+            now=NOW,
+        )
+    assert partial.facts.refunded_funds == Decimal("10")
+    assert len(partial.projection.records) == 2
+
+
 def test_partial_receipt_projects_literal_totals_and_retains_evidence():
     initial = root()
     command = receipt()

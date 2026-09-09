@@ -63,6 +63,7 @@ class RecordedMoneyKind(StrEnum):
     """An assertion of received money, not a provider operation."""
 
     RECEIPT = "receipt"
+    REPAYMENT = "repayment"
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -88,6 +89,13 @@ class RecordedMoneyCommand:
             _text(self.note, "note", maximum=2000)
         if self.evidence_reference is not None:
             _text(self.evidence_reference, "evidence reference")
+        if (
+            self.kind is RecordedMoneyKind.REPAYMENT
+            and self.evidence_reference is None
+        ):
+            raise InvalidTransitionError(
+                "Repayment requires external evidence."
+            )
         _amount(self.amount, positive=True)
         object.__setattr__(self, "occurred_at", _aware(self.occurred_at))
 
@@ -149,18 +157,32 @@ def project_recorded_money(
             or entry.evidence_reference != command.evidence_reference
             or not isinstance(entry.signed_amount, Decimal)
             or not entry.signed_amount.is_finite()
-            or entry.signed_amount != command.amount
+            or entry.signed_amount != _signed_amount(command)
         ):
             raise InvalidTransitionError(
                 "Retained evidence disagrees with command."
             )
-    return RecordedMoneyProjection(
-        records=records,
-        effective_receipts=records,
-        effective_repayments=(),
-        captured_funds=sum((r.signed_amount for r in records), Decimal("0")),
-        refunded_funds=Decimal("0"),
+    receipts = tuple(
+        r for r in records if r.command.kind is RecordedMoneyKind.RECEIPT
     )
+    repayments = tuple(
+        r for r in records if r.command.kind is RecordedMoneyKind.REPAYMENT
+    )
+    captured = sum((r.signed_amount for r in receipts), Decimal("0"))
+    refunded = sum(
+        (r.signed_amount.copy_negate() for r in repayments), Decimal("0")
+    )
+    if refunded > captured:
+        raise InvalidTransitionError("Repayments exceed effective receipts.")
+    return RecordedMoneyProjection(
+        records, receipts, repayments, captured, refunded
+    )
+
+
+def _signed_amount(command: RecordedMoneyCommand) -> Decimal:
+    if command.kind is RecordedMoneyKind.REPAYMENT:
+        return command.amount.copy_negate()
+    return command.amount
 
 
 def plan_recorded_money(
@@ -236,7 +258,7 @@ def plan_recorded_money(
         payment_id=facts.payment_id,
         command=command,
         recorded_at=now,
-        signed_amount=command.amount,
+        signed_amount=_signed_amount(command),
         effective_at=command.occurred_at,
         evidence_reference=command.evidence_reference,
     )
@@ -245,7 +267,11 @@ def plan_recorded_money(
         raise InvalidTransitionError(
             "Recorded receipts exceed the required amount."
         )
-    updated = replace(facts, captured_funds=projection.captured_funds)
+    updated = replace(
+        facts,
+        captured_funds=projection.captured_funds,
+        refunded_funds=projection.refunded_funds,
+    )
     status = project_payment_status(cast("Payment", _FactsPayment(updated)))
     return RecordedMoneyPlan(
         replace(updated, status=status), entry, projection, applied=True
