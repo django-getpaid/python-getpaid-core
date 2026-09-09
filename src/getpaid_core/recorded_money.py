@@ -63,7 +63,7 @@ def _amount(value: Decimal, *, positive: bool = False) -> None:
 
 
 class RecordedMoneyKind(StrEnum):
-    """An assertion of received money, not a provider operation."""
+    """Recorded movements and corrections, never provider operations."""
 
     RECEIPT = "receipt"
     REPAYMENT = "repayment"
@@ -205,7 +205,13 @@ def project_recorded_money(
     *,
     amount_required: Decimal | None = None,
 ) -> RecordedMoneyProjection:
-    """Project receipt evidence without changing the original records."""
+    """Validate ordered history and project its effective movements and totals.
+
+    With ``amount_required``, every prefix also obeys the root's upper bound.
+    No current clock or stored summary is available here; the planner checks
+    those separately. Input entries are retained unchanged, including corrected
+    originals and the counter-entries that withdrew their assertions.
+    """
     if amount_required is not None:
         _amount(amount_required, positive=True)
     records = tuple(history)
@@ -325,7 +331,13 @@ def plan_recorded_money(
     operations: Iterable[OperationRecord] = (),
     replay_records: Iterable[ReplayRecord] = (),
 ) -> RecordedMoneyPlan:
-    """Plan against current facts and complete retained histories; no I/O."""
+    """Plan against current facts and complete retained histories; no I/O.
+
+    The adapter must reload under its atomic boundary, supply its own aware
+    clock and enforce immutable source identity. ``applied=True`` requires an
+    atomic append of ``entry`` with ``facts``; replay returns the retained entry
+    and unchanged current facts. Invalid inputs never produce a repair plan.
+    """
     now = _aware(now)
     _text(facts.payment_id, "payment identity")
     for value in (

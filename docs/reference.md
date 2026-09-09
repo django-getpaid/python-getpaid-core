@@ -40,6 +40,14 @@
    :undoc-members:
 ```
 
+## Recorded Money (Upcoming Stack)
+
+`getpaid_core.recorded_money` provides pure `plan_recorded_money` and
+`project_recorded_money`, immutable commands/entries/projections/plans, and the
+dedicated `RECORDED_MONEY_BACKEND` identity. It records external receipts and
+actual repayments, with audited corrections of mistaken assertions, not provider
+operations. See the [exact API and adapter commit contract](recorded-money.md).
+
 ## Durable Provider Contract
 
 ```{eval-rst}
