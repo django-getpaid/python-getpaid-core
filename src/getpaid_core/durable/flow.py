@@ -20,11 +20,15 @@ released path, and the two must not write the same payment state.
 """
 
 import asyncio
+from collections.abc import Awaitable
+from collections.abc import Callable
 from collections.abc import Mapping
+from contextlib import suppress
 from datetime import datetime
 from datetime import timedelta
 from time import monotonic
 from typing import Any
+from typing import cast
 
 from getpaid_core.durable.evidence import RecoveryEvidence
 from getpaid_core.durable.evidence import normalize_outcome
@@ -202,6 +206,12 @@ class DurablePaymentFlow(BaseFlow):
                 outcome = await processor.submit_operation(
                     operation, config=self.config.get(operation.backend, {})
                 )
+        except asyncio.CancelledError:
+            # Cancelling this task does not cancel the command: the
+            # provider may already be executing it. Record that unknown
+            # outcome within the cleanup bound, then propagate.
+            await self._retain_cancelled_submission(operation)
+            raise
         except (TimeoutError, CommunicationError):
             outcome = OperationOutcome(OperationState.UNKNOWN)
         return await self._record_evidence(operation, outcome)
@@ -222,6 +232,9 @@ class DurablePaymentFlow(BaseFlow):
             or safe_handle(operation.correlation),
             "evidence": evidence,
         }
+        response_attempt = (
+            operation.submission_attempts if submission_response else None
+        )
         try:
             if not isinstance(outcome, OperationOutcome):
                 raise InvalidTransitionError(
@@ -232,12 +245,20 @@ class DurablePaymentFlow(BaseFlow):
                 operation.payment_id,
                 operation.operation_id,
                 outcome,
-                response_attempt=(
-                    operation.submission_attempts
-                    if submission_response
-                    else None
-                ),
+                response_attempt=response_attempt,
             )
+        except asyncio.CancelledError:
+            # The provider already responded, and the only await above is
+            # the write itself, so the outcome is normalized here. Finish
+            # that write within the cleanup bound, then propagate the
+            # cancellation unchanged: it is neither rejection nor a result.
+            await self._retain_cancelled_outcome(
+                operation,
+                cast("OperationOutcome", outcome),
+                evidence,
+                response_attempt,
+            )
+            raise
         except (InvalidTransitionError, OperationConflictError) as exc:
             context["recovery_recorded"] = await self._retain_failure(
                 operation, evidence
@@ -264,14 +285,114 @@ class DurablePaymentFlow(BaseFlow):
         """Best effort, bounded local retention; the original error wins.
 
         Secondary storage errors are deliberately represented by False, not
-        logged with potentially sensitive messages. No task is detached or
-        shielded here. Cancellation cleanup is a separate contract.
+        logged with potentially sensitive messages.
         """
-        try:
-            async with asyncio.timeout(self.recovery_timeout):
+        return await self._cleanup(
+            lambda: self.repository.record_operation_failure(
+                operation.payment_id, operation.operation_id, evidence
+            ),
+            answering_cancellation=False,
+        )
+
+    async def _retain_cancelled_submission(
+        self, operation: OperationRecord
+    ) -> bool:
+        """Record the unknown outcome of an interrupted provider wait.
+
+        Python task cancellation proves nothing about the provider, so the
+        only safe known evidence is that the outcome is unknown. Recording
+        it also retires this dying worker's response claim; if the write
+        does not land, the submitting record remains the recovery anchor.
+        """
+        return await self._cleanup(
+            lambda: self.repository.record_operation_outcome(
+                operation.payment_id,
+                operation.operation_id,
+                OperationOutcome(OperationState.UNKNOWN),
+                response_attempt=operation.submission_attempts,
+            ),
+            answering_cancellation=True,
+        )
+
+    async def _retain_cancelled_outcome(
+        self,
+        operation: OperationRecord,
+        outcome: OperationOutcome,
+        evidence: RecoveryEvidence,
+        response_attempt: int | None,
+    ) -> bool:
+        """Commit an interrupted outcome, or retain its safe claim instead.
+
+        This is the recovery boundary of an ordinary local failure, moved
+        under the cleanup bound: evidence that still applies is committed,
+        and evidence that does not is retained for reconciliation.
+        """
+
+        async def write() -> None:
+            try:
+                await self.repository.record_operation_outcome(
+                    operation.payment_id,
+                    operation.operation_id,
+                    outcome,
+                    response_attempt=response_attempt,
+                )
+            except Exception:
                 await self.repository.record_operation_failure(
                     operation.payment_id, operation.operation_id, evidence
                 )
+
+        return await self._cleanup(write, answering_cancellation=True)
+
+    async def _cleanup(
+        self,
+        write: Callable[[], Awaitable[object]],
+        *,
+        answering_cancellation: bool,
+    ) -> bool:
+        """Run one bounded local write that outlives its own cancellation.
+
+        The write is an owned task, so the cancellation this cleanup
+        answers cannot abort it, and ``recovery_timeout`` bounds it.
+        ``answering_cancellation`` names which cancellation that is. A
+        cleanup entered *because* a cancellation arrived already holds it,
+        so the next one stops the task. Ordinary recovery holds none yet:
+        the first cancellation to arrive is the one this cleanup answers,
+        so the bounded write is allowed to finish and that cancellation
+        then propagates unchanged. Either way a further cancellation stops
+        the task rather than detaching it: no save outlives this call, and
+        the durable record written before it remains discoverable. Never
+        provider I/O.
+        """
+        task = asyncio.ensure_future(self._bounded_write(write))
+        answered: asyncio.CancelledError | None = None
+        while True:
+            try:
+                recorded = await asyncio.shield(task)
+            except asyncio.CancelledError as cancellation:
+                if answering_cancellation or answered is not None:
+                    task.cancel()
+                    # Awaiting the stopped task is what keeps it from
+                    # outliving this call; its own cancellation is the
+                    # expected result, and ``_bounded_write`` has already
+                    # absorbed any write failure.
+                    with suppress(asyncio.CancelledError):
+                        await task
+                    raise
+                # Deferred, never discarded: the same cancellation is
+                # raised below once the bounded write has settled.
+                answered = cancellation
+                continue
+            if answered is not None:
+                raise answered
+            return recorded
+
+    async def _bounded_write(
+        self, write: Callable[[], Awaitable[object]]
+    ) -> bool:
+        """Attempt one local write; an unacknowledged one is False."""
+        try:
+            async with asyncio.timeout(self.recovery_timeout):
+                await write()
         except Exception:
             return False
         return True
