@@ -86,7 +86,8 @@ payment lifecycle status (FSM) and the provider correlation handle
 — null means a one-off payment). Every payment has an order, including
 recurring renewals: merchant-managed renewals charge against an app-created
 billing-cycle order; provider-managed renewals get one materialized at
-correlation time. A RecurringAgreement never references an Order.
+correlation time. A RecurringAgreement never references an Order. A recorded-money payment instead
+tracks attributed assertions about external movements, not a provider attempt.
 
 ### Billing-cycle order
 
@@ -131,12 +132,32 @@ not a fresh financial command or an automatic compensating refund.
 ### Captured funds
 
 The cumulative amount collected through a payment, before refunds. Refunding
-funds does not reduce the amount historically captured.
+funds does not reduce the amount historically captured. For a recorded-money
+payment, this total counts effective Recorded Receipts rather than irrevocable
+provider confirmations.
 
 ### Refunded funds
 
 The cumulative captured amount confirmed returned through refunds. Releasing
-uncaptured authorization does not contribute to refunded funds.
+uncaptured authorization does not contribute to refunded funds. For a
+recorded-money payment, this total counts effective Recorded Repayments.
+
+### Recorded Receipt
+
+An attributed assertion that money arrived outside a provider integration. It
+remains effective unless a Recording Correction identifies it as mistaken.
+
+### Recorded Repayment
+
+An attributed, externally evidenced assertion that previously received money
+was actually returned outside a provider integration. It is not a refund request
+or permission to send money.
+
+### Recording Correction
+
+An attributed counter-entry withdrawing one mistaken Recorded Receipt or
+Recorded Repayment while retaining the original evidence. It corrects an
+assertion, not a real movement of money or a provider confirmation.
 
 ### Remaining authorization
 

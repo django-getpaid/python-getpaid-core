@@ -2,6 +2,10 @@
 
 Status: **Accepted; implementation pending for a breaking major release.**
 
+[ADR 0002](0002-recorded-money-assertions.md) adds a separate upcoming-stack
+recorded-money assertion source. Its audited correction of human mistakes does
+not relax this decision's irrevocable provider-confirmation guarantees.
+
 Core will require durable intent reservation and atomic semantic application on
 current stored state before promising safe financial mutations. Core remains a
 framework-neutral mechanics library: framework wrappers provide persistence and

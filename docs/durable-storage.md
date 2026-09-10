@@ -13,6 +13,14 @@ replay history. The durable contract removes that shape: mutations are
 addressed by payment identity, planned against *current* stored state,
 and committed atomically.
 
+## Recorded-money source
+
+The upcoming stack also has a separate [recorded-money API](recorded-money.md)
+for attributed external receipts, actual repayments and corrections of mistaken
+assertions. Its adapter must append immutable history and commit facts atomically;
+provider repository conformance does not establish that support. It is not a new
+provider operation, and it does not change `MANDATORY_OPERATIONS` below.
+
 ## Mandatory storage capabilities
 
 A repository is usable for money movement only if it provides all of
