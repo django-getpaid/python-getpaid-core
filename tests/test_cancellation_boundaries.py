@@ -2,9 +2,12 @@
 
 Task cancellation is not provider cancellation: these tests cancel at
 deterministic barriers -- at the final local save after a provider result,
-and while awaiting the provider -- and assert that cancellation propagates,
-that safe known evidence is persisted within a finite cleanup bound, and
-that an interrupted cleanup still leaves a discoverable recovery anchor.
+while awaiting the provider, and during the ordinary evidence retention that
+follows a failed local write -- and assert that cancellation propagates, that
+safe known evidence is persisted within a finite cleanup bound, and that an
+interrupted cleanup still leaves a discoverable recovery anchor. Every wait
+here carries its own budget, so a cleanup that stops respecting its bound
+fails these tests finitely instead of hanging them.
 
 Tested async-runtime scope: asyncio only. Nothing here establishes Trio or
 AnyIO behaviour; core declares no support for those runtimes.
@@ -23,6 +26,7 @@ from getpaid_core.durable import OperationOutcome
 from getpaid_core.durable import OperationState
 from getpaid_core.durable import OperationType
 from getpaid_core.durable import PaymentFacts
+from getpaid_core.exceptions import InvalidTransitionError
 from tests.conftest import MockPayment
 from tests.conftest import MockProcessor
 from tests.test_durable_dispatch import NOW
@@ -71,12 +75,42 @@ def barrier_repository(*, blocks="response", retry="commit", retain="commit"):
     return Barrier
 
 
-async def cancel_at(barrier, task):
-    """Cancel ``task`` once it reaches ``barrier``, and collect the result."""
-    await asyncio.wait_for(barrier.wait(), timeout=2)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+def retention_barrier_repository(failure, *, blocks="response"):
+    """A repository whose outcome write fails and whose retention blocks.
+
+    This is ordinary recovery, not cleanup answering a cancellation: the
+    write named by ``blocks`` raises ``failure`` while nothing has been
+    cancelled yet, and the evidence retention that follows stops at
+    ``entered`` until ``released`` is set.
+    """
+
+    class Retention(InMemoryDurableRepository):
+        entered = asyncio.Event()
+        released = asyncio.Event()
+
+        async def record_operation_outcome(self, *args, **kwargs):
+            attempt = kwargs.get("response_attempt")
+            if (attempt is None) == (blocks == "query"):
+                raise failure
+            return await super().record_operation_outcome(*args, **kwargs)
+
+        async def record_operation_failure(self, *args):
+            Retention.entered.set()
+            await Retention.released.wait()
+            return await super().record_operation_failure(*args)
+
+    return Retention
+
+
+BUDGET = 2
+"""Seconds any single step of these tests may take.
+
+Every wait below is bounded by this budget independently of the flow's own
+``recovery_timeout``, so a cleanup that stops respecting its bound fails
+these tests finitely instead of hanging them. No budget is ever spent by
+cancelling the test's own task, which keeps an expired budget
+distinguishable from the cancellation under assertion.
+"""
 
 
 def lingering_tasks():
@@ -90,6 +124,38 @@ def lingering_tasks():
         for task in asyncio.all_tasks()
         if task is not asyncio.current_task()
     }
+
+
+async def reach(barrier, what="barrier"):
+    """Wait for ``barrier`` within the budget, reporting the loop if not."""
+    try:
+        await asyncio.wait_for(barrier.wait(), timeout=BUDGET)
+    except TimeoutError:
+        held = lingering_tasks()
+        pytest.fail(f"{what} not reached in {BUDGET}s; loop held {held}")
+
+
+async def collect_cancelled(task, what="cancelled call"):
+    """Assert ``task`` ends cancelled, under a completion budget of its own.
+
+    ``asyncio.wait`` never cancels the awaiting task, so an expired budget
+    surfaces as this failure rather than as the CancelledError asserted
+    below. The still-running tasks are collected before stopping ``task``.
+    """
+    _, pending = await asyncio.wait({task}, timeout=BUDGET)
+    if pending:
+        held = lingering_tasks()
+        task.cancel()
+        pytest.fail(f"{what} unfinished in {BUDGET}s; loop held {held}")
+    with pytest.raises(asyncio.CancelledError):
+        task.result()
+
+
+async def cancel_at(barrier, task):
+    """Cancel ``task`` once it reaches ``barrier``, and collect the result."""
+    await reach(barrier)
+    task.cancel()
+    await collect_cancelled(task)
 
 
 async def assert_discoverable(repository, operation_id="intent"):
@@ -221,13 +287,106 @@ async def test_repeated_cancellation_stops_cleanup_without_orphan_saves(
         repository_type,
     )
     task = asyncio.create_task(flow.execute_operation("pay", intent, now=NOW))
-    await asyncio.wait_for(repository_type.entered.wait(), timeout=2)
+    await reach(repository_type.entered, "the interrupted outcome write")
     task.cancel()
     # The second cancellation arrives while the cleanup write is in flight.
-    await asyncio.wait_for(repository_type.retried.wait(), timeout=2)
+    await reach(repository_type.retried, "the cleanup write")
     task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    await collect_cancelled(task)
+    operation = await repository.get_operation("pay", "intent")
+    assert operation.state is OperationState.SUBMITTING
+    assert not operation.recovery_evidence
+    await assert_discoverable(repository)
+    assert len(calls) == 1
+    assert not lingering_tasks()
+
+
+@pytest.mark.parametrize("operation_type", list(OperationType))
+@pytest.mark.parametrize(
+    "failure",
+    [
+        OSError("storage unavailable"),
+        InvalidTransitionError("local FSM failure"),
+    ],
+)
+async def test_first_cancellation_lets_ordinary_retention_finish(
+    operation_type, failure
+):
+    repository_type = retention_barrier_repository(failure)
+    repository, flow, intent, calls = await recovery_flow(
+        operation_type,
+        OperationOutcome(OperationState.SUCCEEDED, correlation="provider-1"),
+        repository_type,
+    )
+    before = await repository.get_payment_facts("pay")
+    task = asyncio.create_task(flow.execute_operation("pay", intent, now=NOW))
+    await reach(repository_type.entered, "ordinary evidence retention")
+    # Ordinary recovery was already under way, so this is the cancellation
+    # the cleanup answers: its bounded write must land before propagation.
+    task.cancel()
+    repository_type.released.set()
+    await collect_cancelled(task)
+    operation = await repository.get_operation("pay", "intent")
+    assert operation.state is OperationState.SUBMITTING
+    assert operation.reconciliation_required
+    assert [
+        evidence.correlation for evidence in operation.recovery_evidence
+    ] == ["provider-1"]
+    assert operation.recovery_evidence[0].state is OperationState.SUCCEEDED
+    await assert_money_unchanged(repository, before)
+    await assert_discoverable(repository)
+    assert len(calls) == 1
+    assert not lingering_tasks()
+
+
+@pytest.mark.parametrize("operation_type", list(OperationType))
+async def test_deferred_cancellation_still_respects_the_cleanup_bound(
+    operation_type,
+):
+    repository_type = retention_barrier_repository(
+        OSError("storage unavailable")
+    )
+    repository, flow, intent, calls = await recovery_flow(
+        operation_type,
+        OperationOutcome(OperationState.SUCCEEDED, correlation="provider-1"),
+        repository_type,
+    )
+    # ``released`` is never set, so retention outlasts its own bound.
+    flow.recovery_timeout = 0.001
+    task = asyncio.create_task(flow.execute_operation("pay", intent, now=NOW))
+    await reach(repository_type.entered, "ordinary evidence retention")
+    task.cancel()
+    # Deferring a cancellation must not unbound it: the budget collecting
+    # the task is far larger than the cleanup bound it is proving.
+    await collect_cancelled(task)
+    operation = await repository.get_operation("pay", "intent")
+    assert operation.state is OperationState.SUBMITTING
+    assert not operation.recovery_evidence
+    await assert_discoverable(repository)
+    assert len(calls) == 1
+    assert not lingering_tasks()
+
+
+@pytest.mark.parametrize("operation_type", list(OperationType))
+async def test_repeated_cancellation_stops_ordinary_retention(operation_type):
+    repository_type = retention_barrier_repository(
+        OSError("storage unavailable")
+    )
+    repository, flow, intent, calls = await recovery_flow(
+        operation_type,
+        OperationOutcome(OperationState.SUCCEEDED, correlation="provider-1"),
+        repository_type,
+    )
+    task = asyncio.create_task(flow.execute_operation("pay", intent, now=NOW))
+    await reach(repository_type.entered, "ordinary evidence retention")
+    task.cancel()
+    # Give the deferral a turn to take effect. Should the second
+    # cancellation land on the same await instead, both are still
+    # delivered and the assertions below are unchanged; retention never
+    # unblocks either way, so no wait here bounds the behaviour asserted.
+    await asyncio.wait({task}, timeout=0.01)
+    task.cancel()
+    await collect_cancelled(task)
     operation = await repository.get_operation("pay", "intent")
     assert operation.state is OperationState.SUBMITTING
     assert not operation.recovery_evidence
@@ -315,6 +474,35 @@ async def test_cancelled_query_commits_its_evidence_without_claiming_a_worker():
     # The submitting response acknowledged attempt 1; a query acknowledges
     # no producer, and the cleanup must not start acknowledging one.
     assert repository_type.attempts == [1, None, None]
+    assert not lingering_tasks()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        OSError("storage unavailable"),
+        InvalidTransitionError("local FSM failure"),
+    ],
+)
+async def test_first_cancellation_lets_query_retention_finish(failure):
+    repository_type = retention_barrier_repository(failure, blocks="query")
+    repository, flow = await queried_charge(repository_type)
+    before = await repository.get_payment_facts("pay")
+    task = asyncio.create_task(
+        flow.reconcile_operation("pay", "intent", now=NOW)
+    )
+    await reach(repository_type.entered, "ordinary evidence retention")
+    task.cancel()
+    repository_type.released.set()
+    await collect_cancelled(task)
+    operation = await repository.get_operation("pay", "intent")
+    assert operation.state is OperationState.UNKNOWN
+    assert operation.reconciliation_required
+    assert [
+        evidence.correlation for evidence in operation.recovery_evidence
+    ] == ["charge-1"]
+    await assert_money_unchanged(repository, before)
+    await assert_discoverable(repository)
     assert not lingering_tasks()
 
 

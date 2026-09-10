@@ -279,7 +279,10 @@ provider rejection. Core attempts `record_operation_failure` once, bounded by
 `context["recovery_recorded"]` reports whether that attempt was acknowledged.
 If it fails or times out, the original error still wins and the pre-submission
 record remains the recovery anchor. Failed acknowledgement does not prove that
-either local write rolled back.
+either local write rolled back. A cancellation arriving during that attempt is
+the one exception to the original error winning: the bounded write is allowed to
+finish, then `CancelledError` propagates in its place, with the original failure
+still reachable as `__context__`.
 
 Every submission claim appends its attempt number to the immutable tuple
 `OperationRecord.pending_response_attempts` atomically. `response_pending` is True
@@ -321,6 +324,7 @@ reached:
 | Awaiting the provider | records an `unknown` outcome and retires this worker's response claim | the `submitting` record stays discoverable |
 | The outcome write after a provider response | commits that outcome once more, or retains its safe evidence and flags reconciliation | the durable record written before it remains the recovery anchor |
 | An authoritative query's evidence write | the same, acknowledging no submitting worker | the same |
+| The evidence retention that follows a failed outcome write | that retention completes before the cancellation propagates | the same |
 | Operator resolution, or applying an observation | none; neither carries an outstanding provider effect of its own | retry the same resolution ID; redelivery of the callback is the provider's job |
 | `flow.record_operation_outcome()`, called with evidence the application already holds | none; core never obtained this evidence and cannot re-obtain it | the caller still holds it, and records it again |
 
@@ -331,8 +335,11 @@ eligibility stays governed by the provider's declared idempotency guarantee.
 
 Cleanup is one owned task bounded by `recovery_timeout`, writing only through
 the repository: no provider I/O, no unbounded shield, and no detached background
-save. A cancellation arriving *during* cleanup stops that task rather than
-detaching it, and propagates.
+save. Each cleanup answers exactly one cancellation. Cleanup entered *because*
+a cancellation arrived already holds that one; cleanup that is ordinary recovery
+from a failed local write holds none yet, so the first cancellation to arrive is
+the one it answers and its bounded write is allowed to finish. Either way a
+*further* cancellation stops that task rather than detaching it, and propagates.
 
 Integration responsibilities:
 

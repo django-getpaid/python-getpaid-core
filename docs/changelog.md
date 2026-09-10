@@ -16,7 +16,9 @@
   `CancelledError` propagates. A cancelled wait for the provider records an
   `unknown` outcome and retires that worker's response claim; a cancelled
   outcome write is completed once more, or its safe evidence retained with a
-  reconciliation flag. Cleanup is a single owned task bounded by
+  reconciliation flag. Cancelling the ordinary evidence retention that follows
+  a failed outcome write is answered the same way: that bounded write completes
+  before the cancellation propagates. Cleanup is a single owned task bounded by
   `recovery_timeout` — never provider I/O, never a detached save — and a
   further cancellation stops it, leaving the durable record as the recovery
   anchor. Applications must budget `recovery_timeout` into their own deadlines.

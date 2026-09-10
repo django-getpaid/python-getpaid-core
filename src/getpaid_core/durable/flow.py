@@ -290,7 +290,8 @@ class DurablePaymentFlow(BaseFlow):
         return await self._cleanup(
             lambda: self.repository.record_operation_failure(
                 operation.payment_id, operation.operation_id, evidence
-            )
+            ),
+            answering_cancellation=False,
         )
 
     async def _retain_cancelled_submission(
@@ -309,7 +310,8 @@ class DurablePaymentFlow(BaseFlow):
                 operation.operation_id,
                 OperationOutcome(OperationState.UNKNOWN),
                 response_attempt=operation.submission_attempts,
-            )
+            ),
+            answering_cancellation=True,
         )
 
     async def _retain_cancelled_outcome(
@@ -339,28 +341,50 @@ class DurablePaymentFlow(BaseFlow):
                     operation.payment_id, operation.operation_id, evidence
                 )
 
-        return await self._cleanup(write)
+        return await self._cleanup(write, answering_cancellation=True)
 
-    async def _cleanup(self, write: Callable[[], Awaitable[object]]) -> bool:
+    async def _cleanup(
+        self,
+        write: Callable[[], Awaitable[object]],
+        *,
+        answering_cancellation: bool,
+    ) -> bool:
         """Run one bounded local write that outlives its own cancellation.
 
         The write is an owned task, so the cancellation this cleanup
-        answers cannot abort it, and ``recovery_timeout`` bounds it. A
-        cancellation arriving *during* cleanup stops that task rather than
-        detaching it: no save outlives this call, and the durable record
-        written before it remains discoverable. Never provider I/O.
+        answers cannot abort it, and ``recovery_timeout`` bounds it.
+        ``answering_cancellation`` names which cancellation that is. A
+        cleanup entered *because* a cancellation arrived already holds it,
+        so the next one stops the task. Ordinary recovery holds none yet:
+        the first cancellation to arrive is the one this cleanup answers,
+        so the bounded write is allowed to finish and that cancellation
+        then propagates unchanged. Either way a further cancellation stops
+        the task rather than detaching it: no save outlives this call, and
+        the durable record written before it remains discoverable. Never
+        provider I/O.
         """
         task = asyncio.ensure_future(self._bounded_write(write))
-        try:
-            return await asyncio.shield(task)
-        except asyncio.CancelledError:
-            task.cancel()
-            # Awaiting the stopped task is what keeps it from outliving
-            # this call; its own cancellation is the expected result, and
-            # ``_bounded_write`` has already absorbed any write failure.
-            with suppress(asyncio.CancelledError):
-                await task
-            raise
+        answered: asyncio.CancelledError | None = None
+        while True:
+            try:
+                recorded = await asyncio.shield(task)
+            except asyncio.CancelledError as cancellation:
+                if answering_cancellation or answered is not None:
+                    task.cancel()
+                    # Awaiting the stopped task is what keeps it from
+                    # outliving this call; its own cancellation is the
+                    # expected result, and ``_bounded_write`` has already
+                    # absorbed any write failure.
+                    with suppress(asyncio.CancelledError):
+                        await task
+                    raise
+                # Deferred, never discarded: the same cancellation is
+                # raised below once the bounded write has settled.
+                answered = cancellation
+                continue
+            if answered is not None:
+                raise answered
+            return recorded
 
     async def _bounded_write(
         self, write: Callable[[], Awaitable[object]]
